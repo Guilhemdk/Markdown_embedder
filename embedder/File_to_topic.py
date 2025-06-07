@@ -1,0 +1,279 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import re
+import sys
+from typing import List, Tuple, Dict
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+
+def slugify(text: str) -> str:
+    """
+    Simplest slugifier: lowercase, replace non-alphanumeric with underscore,
+    collapse multiple underscores, strip leading/trailing underscores.
+    """
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9]+', '_', text)
+    text = re.sub(r'__+', '_', text)
+    return text.strip('_')
+
+import re
+from typing import Tuple, Dict
+
+def extract_fenced_code(full_text: str) -> Tuple[str, Dict[str, str]]:
+    """
+    Extract all fenced code blocks (```...```) from full_text.
+    Replace each with a placeholder __CODEi__, but only if removing the block does not
+    leave the text all whitespace. If a block is the only content under its heading,
+    it will not be removed, so that code-only topics are never emptied.
+
+    Returns (text_without_code, code_map) where code_map maps "__CODEi__" -> code_block.
+    """
+    code_pattern = re.compile(r'(?ms)(```.*?```)\n?')
+    code_map: Dict[str, str] = {}
+    idx = 0
+
+    def replacer(match):
+        nonlocal idx
+        block = match.group(1)
+        key = f"__CODE{idx}__"
+
+        # Tentatively remove this block
+        nonlocal tentative_text
+        start, end = match.span()
+        # Build a version of the text with this block removed
+        candidate = tentative_text[:start] + key + "\n" + tentative_text[end:]
+        # If the result is entirely whitespace or blank, do not remove
+        if candidate.strip() == "":
+            return block  # keep the fence as-is
+        # Otherwise, commit to removing it and storing in map
+        code_map[key] = block
+        idx += 1
+        tentative_text = candidate
+        return key + "\n"
+
+    # We need to iteratively apply replacer so it updates tentative_text
+    tentative_text = full_text
+    # Use sub to replace blocks one by one
+    text_no_code = code_pattern.sub(replacer, full_text)
+
+    return text_no_code, code_map
+
+def reinsert_code(chunk: str, code_map: Dict[str, str]) -> str:
+    """
+    Given a chunk that may contain placeholders __CODEi__,
+    replace each placeholder with its original fenced code block.
+    """
+    for key, code in code_map.items():
+        chunk = chunk.replace(key, code)
+    return chunk
+
+def find_headings_at_level(full_text: str, level: int) -> List[Tuple[int, str]]:
+    """
+    Find all headings of exactly the specified Markdown level (e.g. level=1 matches '^# ').
+    Returns a list of (byte_offset, heading_text).
+    """
+    pattern = re.compile(rf'(?m)^(#{{{level}}})\s+(.*)')
+    matches = []
+    for m in pattern.finditer(full_text):
+        offset = m.start()
+        heading_text = m.group(2).strip()
+        matches.append((offset, heading_text))
+    return matches
+
+def naive_split_on_offsets(full_text: str, offsets: List[Tuple[int, str]]) -> List[str]:
+    """
+    Given full_text and a list of (offset, heading_text) sorted by offset,
+    return a list of substrings, each from one offset to the next.
+    Each substring begins with its heading.
+    """
+    chunks = []
+    for i, (start, _) in enumerate(offsets):
+        end = offsets[i+1][0] if i+1 < len(offsets) else len(full_text)
+        chunks.append(full_text[start:end])
+    return chunks
+
+def tfidf_cosine_similarity(a: str, b: str) -> float:
+    """
+    Compute TF-IDF vectors for strings a and b, then return cosine similarity.
+    If TF-IDF fails due to empty vocabulary, return 1.0 to force a merge.
+    """
+    try:
+        vect = TfidfVectorizer().fit([a, b])
+        vecs = vect.transform([a, b])
+        return cosine_similarity(vecs[0], vecs[1])[0][0]
+    except ValueError:
+        return 1.0
+
+def semimatch_and_merge_tfidf(chunks: List[str], threshold: float) -> List[str]:
+    """
+    Merge adjacent chunks if their TF-IDF cosine similarity exceeds threshold.
+    """
+    if not chunks:
+        return []
+    merged = []
+    buffer = chunks[0]
+    for nxt in chunks[1:]:
+        sim = tfidf_cosine_similarity(buffer, nxt)
+        if sim > threshold:
+            buffer = buffer + "\n\n" + nxt
+        else:
+            merged.append(buffer)
+            buffer = nxt
+    merged.append(buffer)
+    return merged
+
+def split_into_topics(
+    full_text: str,
+    min_heading_count: int,
+    max_split_level: int,
+    tfidf_threshold: float,
+    reintegrate_code: bool
+) -> List[Tuple[str, str]]:
+    """
+    1) Extract and remove fenced code blocks.
+    2) Find headings at levels 1..max_split_level; if at least min_heading_count found,
+       split on that level. Otherwise, treat entire text as one chunk.
+    3) Naively split on chosen headings (in code-free text).
+    4) Semantically merge adjacent chunks via TF-IDF.
+    5) Optionally reinsert code placeholders into each merged chunk.
+    6) Return list of (slug, chunk_text).
+    """
+    # 1) Extract code
+    text_no_code, code_map = extract_fenced_code(full_text)
+
+    # 2) Find headings up to max_split_level
+    chosen_level = None
+    offsets: List[Tuple[int, str]] = []
+    for level in range(1, max_split_level + 1):
+        headings = find_headings_at_level(text_no_code, level)
+        if len(headings) >= min_heading_count:
+            chosen_level = level
+            offsets = headings
+            break
+
+    # 3) If no splitting level found, entire document is one topic
+    if chosen_level is None:
+        m = re.search(r'(?m)^#\s+(.*)', text_no_code)
+        if m:
+            raw_heading = m.group(1).strip()
+            slug = slugify(raw_heading)
+        else:
+            slug = "full_document"
+        chunk_text = text_no_code if not reintegrate_code else reinsert_code(text_no_code, code_map)
+        return [(slug, chunk_text)]
+
+    # 4) Naively split on offsets in code-free text
+    naive_chunks_no_code = naive_split_on_offsets(text_no_code, offsets)
+
+    # 5) Semantically merge adjacent code-free chunks
+    merged_chunks_no_code = semimatch_and_merge_tfidf(naive_chunks_no_code, tfidf_threshold)
+
+    # 6) Reinsert code if requested, derive slug for each merged chunk
+    results: List[Tuple[str, str]] = []
+    print(reintegrate_code)
+    for chunk_no_code in merged_chunks_no_code:
+        chunk_text = chunk_no_code if not reintegrate_code else reinsert_code(chunk_no_code, code_map)
+        m = re.search(r'(?m)^#{1,' + str(chosen_level) + r'}\s+(.*)', chunk_no_code)
+        if m:
+            raw = m.group(1).strip()
+            slug = slugify(raw)
+        else:
+            slug = f"topic_{len(results)+1}"
+        results.append((slug, chunk_text))
+
+    return results
+
+def is_header_only_chunk(text: str) -> bool:
+    """
+    Return True if the chunk contains only a single heading and no other non-whitespace lines.
+    """
+    lines = [line for line in text.splitlines() if line.strip() != ""]
+    if not lines:
+        return True
+    # If only one line, and it starts with '#', consider header-only
+    if len(lines) == 1 and re.match(r'^\s*#+\s+', lines[0]):
+        return True
+    return False
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Split a Markdown file into per-topic subfiles (ignore code comments as headings)."
+    )
+    parser.add_argument(
+        "file_path",
+        help="Path to the input Markdown file."
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="topics_output",
+        help="Directory to write the topic subfiles (default: ./topics_output)."
+    )
+    parser.add_argument(
+        "--min_heading_count",
+        type=int,
+        default=3,
+        help="Minimum number of headings at chosen level to trigger splitting (default: 3)."
+    )
+    parser.add_argument(
+        "--max_split_level",
+        type=int,
+        default=2,
+        help="Maximum heading level to attempt splitting on (1=H1, 2=H2, etc., default=2)."
+    )
+    parser.add_argument(
+        "--tfidf_threshold",
+        type=float,
+        default=0.9,
+        help="TF-IDF cosine threshold to merge adjacent chunks (default: 0.9)."
+    )
+    parser.add_argument(
+        "--reintegrate_code",
+        action="store_true",
+        default=True,
+        help="Whether to reinsert fenced code into chunks (default: True)."
+    )
+    parser.add_argument(
+        "--drop_empty_headers",
+        action="store_true",
+        default=True,
+        help="If set, delete any chunk that contains only a header and no other content."
+    )
+
+    args = parser.parse_args()
+
+    # 1) Read the full Markdown
+    if not os.path.isfile(args.file_path):
+        print(f"Error: File not found: {args.file_path}")
+        sys.exit(1)
+    with open(args.file_path, "r", encoding="utf-8") as f:
+        full_text = f.read()
+
+    # 2) Split into topic chunks
+    topics = split_into_topics(
+        full_text,
+        min_heading_count=args.min_heading_count,
+        max_split_level=args.max_split_level,
+        tfidf_threshold=args.tfidf_threshold,
+        reintegrate_code=args.reintegrate_code
+    )
+
+    # 3) Write each (slug, chunk_text) to output_dir, optionally dropping empty-header chunks
+    os.makedirs(args.output_dir, exist_ok=True)
+    written = 0
+    for slug, text in topics:
+        if args.drop_empty_headers and is_header_only_chunk(text):
+            continue
+        filename = f"{slug}.md"
+        outpath = os.path.join(args.output_dir, filename)
+        with open(outpath, "w", encoding="utf-8") as outf:
+            outf.write(text)
+        written += 1
+
+    print(f"Wrote {written} topic file(s) into '{args.output_dir}'.")
+
+if __name__ == "__main__":
+    main()
+
