@@ -113,6 +113,13 @@ def process_topic_text(
 
         for chunk in section_chunks:
             text = chunk["text"]
+            # Diagnostic print
+            # print(f"[PROCESS_TOPIC_DEBUG] Processing chunk. Title hint: {chunk.get('own_heading', 'N/A')}. Text length: {len(text)}. Text snippet: {text[:200]}...{text[-100:] if len(text) > 300 else ''}")
+
+            # Small chunk filtering
+            if count_tokens(text) < 5:
+                # print(f"[PROCESS_TOPIC_DEBUG] Skipping chunk with token count < 5. Title hint: {chunk.get('own_heading', 'N/A')}. Token count: {count_tokens(text)}.")
+                continue
 
             # 7b) Determine own_heading (first H2..H6 in chunk or inherited)
             local_headings = get_headings_only(text)

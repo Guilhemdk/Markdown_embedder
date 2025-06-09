@@ -1,0 +1,24 @@
+# Ignore generated output directories
+topics_output/
+final_output/
+final_output_*/
+
+# Python specific ignores
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+*.spec
+.pytest_cache/
+.mypy_cache/
+.tox/
+.nox/
+*.log
+.coverage
+.hypothesis/

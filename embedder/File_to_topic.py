@@ -26,28 +26,32 @@ def extract_fenced_code(full_text: str) -> Tuple[str, Dict[str, str]]:
 
     current_search_start_pos = 0
     accumulated_parts = []
-    temp_processed_text_for_searching = full_text
+    temp_processed_text_for_searching = full_text # Keep original full_text for searching
 
     while True:
         match = code_pattern.search(temp_processed_text_for_searching, pos=current_search_start_pos)
 
         if not match:
+            # No more matches, append the rest of the text from current_search_start_pos
             accumulated_parts.append(temp_processed_text_for_searching[current_search_start_pos:])
             break
 
-        block_content_for_map = match.group(1)  # The ```...``` content
-        captured_newline = match.group(2)     # The captured newline(s) or empty string
+        block_content_for_map = match.group(1)  # The ```...``` content itself
+        captured_newline = match.group(2)     # The captured newline(s) or empty string after the block
 
         key = f"__CODE{idx}__"
 
-        match_start_offset, match_end_offset = match.span(0) # Span of the entire match
+        match_start_offset, match_end_offset = match.span(0) # Span of the entire match (block + newline)
 
+        # Append the part of the text *before* the current match
         accumulated_parts.append(temp_processed_text_for_searching[current_search_start_pos:match_start_offset])
 
-        # Replace with key + exactly what was after the ```...``` (the captured newline[s])
+        # Add the placeholder followed by the captured newline(s)
+        # This preserves the original spacing after the code block.
         accumulated_parts.append(key + captured_newline)
         code_map[key] = block_content_for_map
 
+        # Move the search start position to the end of the current match
         current_search_start_pos = match_end_offset
         idx += 1
 
