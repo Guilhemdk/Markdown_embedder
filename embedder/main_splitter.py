@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
+"""
+Processes Markdown files to split them into topic-based segments,
+then further chunks these topics into smaller pieces suitable for embedding.
+Includes functionality for initial topic splitting based on headings and TF-IDF similarity,
+recursive chunking of topics by hierarchy and delimiters, metadata extraction,
+and optional merging of final small chunk files.
+"""
 import argparse
 import os
 import re
 import sys
-from typing import List, Dict, Tuple # Added Tuple
+from typing import List, Dict, Tuple
+from pathlib import Path # Added Path
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Import functions from the separate modules:
-# – split_into_topics from Marking_splitter
-# – recursive_split_by_hierarchy_and_delimiters and count_tokens from Marking_splitter
-# – metadata helpers from metadata_parser
-#
-# Since these modules are provided alongside, we assume they're in the same directory.
-from File_to_topic import (
-        split_into_topics,
-    is_header_only_chunk
-)
+# Helper functions from Marking_splitter (for hierarchical chunking)
+# and metadata_parser (for extracting metadata elements) are imported.
+# Topic splitting utilities formerly in File_to_topic.py are now part of this file.
+
 from Marking_splitter import (
     count_tokens,
     recursive_split_by_hierarchy_and_delimiters
@@ -35,6 +37,221 @@ from metadata_parser import (
 DEFAULT_CHUNK_SIZE = 1200      # max tokens per chunk
 LOWER_THRESHOLD = 500          # min tokens to consider merging small chunks
 MERGE_THRESHOLD = 0.3          # cosine-sim threshold for merging siblings
+
+
+# --- Topic Splitting Utilities (copied from File_to_topic.py) ---
+
+def slugify(text: str) -> str:
+    """
+    Simplest slugifier: lowercase, replace non-alphanumeric with underscore,
+    collapse multiple underscores, strip leading/trailing underscores.
+    """
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9]+', '_', text)
+    text = re.sub(r'__+', '_', text)
+    return text.strip('_')
+
+def extract_fenced_code(full_text: str) -> Tuple[str, Dict[str, str]]:
+    # Pattern to capture the code block (group 1) and the immediately following newline(s) (group 2)
+    code_pattern = re.compile(r'(?ms)(```.*?```)(\n?)')
+    code_map: Dict[str, str] = {}
+    idx = 0
+
+    current_search_start_pos = 0
+    accumulated_parts = []
+    temp_processed_text_for_searching = full_text # Keep original full_text for searching
+
+    while True:
+        match = code_pattern.search(temp_processed_text_for_searching, pos=current_search_start_pos)
+
+        if not match:
+            # No more matches, append the rest of the text from current_search_start_pos
+            accumulated_parts.append(temp_processed_text_for_searching[current_search_start_pos:])
+            break
+
+        block_content_for_map = match.group(1)  # The ```...``` content itself
+        captured_newline = match.group(2)     # The captured newline(s) or empty string after the block
+
+        key = f"__CODE{idx}__"
+
+        match_start_offset, match_end_offset = match.span(0) # Span of the entire match (block + newline)
+
+        # Append the part of the text *before* the current match
+        accumulated_parts.append(temp_processed_text_for_searching[current_search_start_pos:match_start_offset])
+
+        # Add the placeholder followed by the captured newline(s)
+        # This preserves the original spacing after the code block.
+        accumulated_parts.append(key + captured_newline)
+        code_map[key] = block_content_for_map
+
+        # Move the search start position to the end of the current match
+        current_search_start_pos = match_end_offset
+        idx += 1
+
+    return "".join(accumulated_parts), code_map
+
+def reinsert_code(chunk: str, code_map: Dict[str, str]) -> str:
+    """
+    Given a chunk that may contain placeholders __CODEi__,
+    replace each placeholder with its original fenced code block.
+    """
+    for key, code in code_map.items():
+        chunk = chunk.replace(key, code)
+    return chunk
+
+def find_headings_at_level(full_text: str, level: int) -> List[Tuple[int, str]]:
+    """
+    Find all headings of exactly the specified Markdown level (e.g. level=1 matches '^# ').
+    Returns a list of (byte_offset, heading_text).
+    (Copied from File_to_topic.py)
+    """
+    pattern = re.compile(rf'(?m)^(#{{{level}}})\s+(.*)')
+    matches = []
+    for m in pattern.finditer(full_text):
+        offset = m.start()
+        heading_text = m.group(2).strip()
+        matches.append((offset, heading_text))
+    return matches
+
+def naive_split_on_offsets(full_text: str, offsets: List[Tuple[int, str]]) -> List[str]:
+    """
+    Given full_text and a list of (offset, heading_text) sorted by offset,
+    return a list of substrings, each from one offset to the next.
+    Each substring begins with its heading.
+    (Copied from File_to_topic.py)
+    """
+    chunks = []
+    for i, (start, _) in enumerate(offsets):
+        end = offsets[i+1][0] if i+1 < len(offsets) else len(full_text)
+        chunks.append(full_text[start:end])
+    return chunks
+
+def _local_tfidf_cosine_similarity(a: str, b: str) -> float:
+    """
+    Compute TF-IDF vectors for strings a and b, then return cosine similarity.
+    If TF-IDF fails due to empty vocabulary, return 1.0 to force a merge.
+    (Copied and renamed from File_to_topic.py's tfidf_cosine_similarity)
+    Uses TfidfVectorizer and cosine_similarity already imported in main_splitter.py.
+    """
+    try:
+        # Ensure TfidfVectorizer and cosine_similarity are available in this scope
+        # They are imported at the top of main_splitter.py
+        vect = TfidfVectorizer().fit([a, b]) #fixed: true -> [a,b]
+        vecs = vect.transform([a, b]) #fixed: true -> [a,b]
+        return cosine_similarity(vecs[0], vecs[1])[0][0]
+    except ValueError: # Typically "empty vocabulary"
+        return 1.0 # Force merge if TF-IDF fails (e.g., very short, non-alphanumeric strings)
+
+def semimatch_and_merge_tfidf(chunks: List[str], threshold: float) -> List[str]:
+    """
+    Merge adjacent chunks if their TF-IDF cosine similarity exceeds threshold.
+    Uses _local_tfidf_cosine_similarity.
+    (Copied from File_to_topic.py)
+    """
+    if not chunks:
+        return []
+    merged = []
+    buffer = chunks[0]
+    for nxt in chunks[1:]:
+        sim = _local_tfidf_cosine_similarity(buffer, nxt)
+        if sim > threshold:
+            buffer = buffer + "\n\n" + nxt
+        else:
+            merged.append(buffer)
+            buffer = nxt
+    merged.append(buffer)
+    return merged
+
+def split_into_topics(
+    full_text: str,
+    min_heading_count: int,
+    max_split_level: int,
+    tfidf_threshold: float,
+    reintegrate_code: bool
+) -> List[Tuple[str, str]]:
+    """
+    1) Extract and remove fenced code blocks.
+    2) Find headings at levels 1..max_split_level; if at least min_heading_count found,
+       split on that level. Otherwise, treat entire text as one chunk.
+    3) Naively split on chosen headings (in code-free text).
+    4) Semantically merge adjacent chunks via TF-IDF.
+    5) Optionally reinsert code placeholders into each merged chunk.
+    6) Return list of (slug, chunk_text).
+    (Copied from File_to_topic.py)
+    """
+    # 1) Extract code
+    text_no_code, code_map = extract_fenced_code(full_text)
+
+    # 2) Find headings up to max_split_level
+    chosen_level = None
+    offsets: List[Tuple[int, str]] = []
+    for level in range(1, max_split_level + 1):
+        headings = find_headings_at_level(text_no_code, level)
+        if len(headings) >= min_heading_count:
+            chosen_level = level
+            offsets = headings
+            break
+
+    # 3) If no splitting level found, entire document is one topic
+    if chosen_level is None:
+        m = re.search(r'(?m)^#\s+(.*)', text_no_code)
+        if m:
+            raw_heading = m.group(1).strip()
+            slug = slugify(raw_heading)
+        else:
+            # Try to find the filename if possible, or a generic slug
+            # This part is tricky as we don't have filename here directly.
+            # Fallback to a generic slug.
+            slug = "full_document_topic" # Make it more specific
+        chunk_text = text_no_code if not reintegrate_code else reinsert_code(text_no_code, code_map)
+        return [(slug, chunk_text)]
+
+    # 4) Naively split on offsets in code-free text
+    naive_chunks_no_code = naive_split_on_offsets(text_no_code, offsets)
+
+    # 5) Semantically merge adjacent code-free chunks
+    merged_chunks_no_code = semimatch_and_merge_tfidf(naive_chunks_no_code, tfidf_threshold)
+
+    # 6) Reinsert code if requested, derive slug for each merged chunk
+    results: List[Tuple[str, str]] = []
+    # print(f"[DEBUG] Reintegrate code flag in split_into_topics: {reintegrate_code}") # For debugging
+    for chunk_no_code in merged_chunks_no_code:
+        chunk_text = chunk_no_code # Default to no code reintegration
+        if reintegrate_code:
+             chunk_text = reinsert_code(chunk_no_code, code_map)
+
+        # Try to find heading within the chunk_no_code (as code might interfere with regex)
+        # Search for chosen_level first, then any higher level up to H1.
+        best_heading_for_slug = None
+        for lvl_search in range(chosen_level, 0, -1):
+            m_slug = re.search(rf'(?m)^(#{{{lvl_search}}})\s+(.*)', chunk_no_code)
+            if m_slug:
+                best_heading_for_slug = m_slug.group(2).strip()
+                break
+
+        if best_heading_for_slug:
+            slug = slugify(best_heading_for_slug)
+        else:
+            # Fallback slug if no heading found in chunk (should be rare if split by headings)
+            slug = f"topic_{len(results)+1}"
+        results.append((slug, chunk_text))
+
+    return results
+
+def is_header_only_chunk(text: str) -> bool:
+    """
+    Return True if the chunk contains only a single heading and no other non-whitespace lines.
+    (Moved from File_to_topic.py)
+    """
+    lines = [line for line in text.splitlines() if line.strip() != ""]
+    if not lines:
+        return True # Empty or whitespace-only is effectively header-only for dropping purposes
+    # If only one line, and it starts with '#', consider header-only
+    if len(lines) == 1 and re.match(r'^\s*#+\s+', lines[0]):
+        return True
+    return False
+
+# --- End of Topic Splitting Utilities ---
 
 
 def find_deepest_chunk_directories(root_output_dir: str) -> List[str]:
@@ -203,35 +420,73 @@ def process_topic_text(
     drop_empty_headers: bool
 ) -> List[Dict]:
     """
-    Given a single topic (slug, text) extracted by split_into_topics, perform
-    the usual recursive chunking + metadata extraction. Writes .md files if mode=="md",
-    or returns a list of {"text":..., "metadata":...} if mode=="embed".
+    Processes a single topic's text content. This involves:
+    - Extracting file-level metadata (hardcoded cluster, version context, outline date from topic text).
+    - Identifying the root title of the topic.
+    - Preparing for custom stop words if LLM stoplist generation is enabled (currently placeholder).
+    - Extracting all headings from the topic text.
+    - Recursively splitting the topic text into smaller chunks based on heading hierarchy and token limits.
+    - For each chunk:
+        - Determining its own heading.
+        - Calculating a section number.
+        - Generating a unique chunk ID (incorporating topic slug and start line).
+        - Building a section hierarchy.
+        - Extracting keywords and a description.
+        - Assembling all metadata.
+        - If in "md" mode, writing the chunk text and metadata to a .md file.
+        - If in "embed" mode, adding the chunk text and metadata to a list for return.
+    - Optionally, if in "embed" mode, merging very small sibling chunks based on token count and similarity.
+
+    Args:
+        topic_slug: The slugified name of the current topic.
+        topic_text: The actual text content of the current topic.
+        original_filename: The relative path of the original source Markdown file (used for metadata).
+        mode: "md" to write chunked .md files, or "embed" to return text+metadata dictionaries.
+        chunk_size: Maximum tokens per final chunk from hierarchical splitting.
+        lower_threshold: (For "embed" mode) Min tokens to consider merging small final chunks.
+        merge_threshold: (For "embed" mode) Cosine similarity for merging small final chunks.
+        use_llm_stoplist: Flag to enable LLM-based stoplist generation (currently placeholder).
+        output_dir: The directory where final chunked .md files for this topic should be written.
+        drop_empty_headers: If True, skip writing chunks that are only a header.
+
+    Returns:
+        List[Dict]: A list of {"text": chunk_text, "metadata": chunk_metadata} dictionaries if mode is "embed".
+                     An empty list if mode is "md" (as files are written to disk).
     """
-    # 1) File-level metadata: cluster is "memory" (hardcoded for these three files)
-    cluster = "memory"
-    topic = topic_slug
+    # 1) File-level metadata
+    cluster = "memory" # Hardcoded for now, consider making this configurable or derived
+    topic = topic_slug # This is the slug of the current topic segment
+
+    # Parse version context and outline date from the current topic's text
     version_context = parse_version_context(topic_text)
     outline_date = parse_outline_date(topic_text)
-    # original_filename is now the relative path to the topic file itself.
+
+    # 'original_filename' is the relative path of the original large Markdown file being processed.
+    # This is used for the 'file_path' field in metadata.
     file_path = original_filename
 
-    # 2) Root-level title (first H1 in topic_text)
+    # 2) Root-level title (first H1 found in the current topic_text)
+    # This might be different from the original file's first H1 if split by H1s.
     root_title = None
     for line in topic_text.splitlines():
         if line.startswith("# "):
             root_title = line[2:].strip()
             break
 
-    # 3) Optional LLM stoplist stub
+    # 3) Optional LLM stoplist generation
     custom_stop: List[str] = []
     if use_llm_stoplist:
         try:
-            # Placeholder; not implemented
-            raise NotImplementedError("LLM-based stoplist not implemented.")
+            # Placeholder for actual LLM-based stoplist generation.
+            # This would populate `custom_stop` with words.
+            raise NotImplementedError("LLM-based stoplist generation is not implemented.")
         except NotImplementedError:
+            # If not implemented or fails, custom_stop remains empty.
+            # extract_keywords will then use its default stoplist.
+            print("[INFO] LLM-based stoplist not implemented; using default stoplist for keyword extraction.")
             custom_stop = []
 
-    # 4) Extract all headings (levels 2–6) relative to topic_text
+    # 4) Extract all headings (levels 2–6) from the current topic_text
     headings = extract_headings(topic_text)
 
     # 5) Identify top-level sections by Level-2 headings in topic_text
@@ -395,38 +650,38 @@ def unified_main():
     parser.add_argument(
         "--min_heading_count",
         type=int,
-        default=3,
-        help="Min # of headings at level ≤ max_split_level to trigger topic splitting (default: 3)."
+        default=3, # From File_to_topic.py
+        help="Minimum number of headings at chosen level to trigger topic splitting (default: 3)."
     )
     parser.add_argument(
         "--max_split_level",
         type=int,
-        default=2,
-        help="Max heading level to split topics on (1=H1, 2=H2, etc., default: 2)."
+        default=2, # From File_to_topic.py
+        help="Maximum heading level to attempt splitting topics on (1=H1, 2=H2, etc., default=2)."
     )
     parser.add_argument(
-        "--tfidf_threshold",
+        "--tfidf_threshold", # This is for initial topic splitting
         type=float,
-        default=0.9,
-        help="TF-IDF cosine threshold to merge adjacent topic chunks (default: 0.9)."
+        default=0.9, # From File_to_topic.py
+        help="TF-IDF cosine threshold to merge adjacent topic chunks during initial topic splitting (default: 0.9)."
     )
     parser.add_argument(
-        "--chunk_size",
+        "--chunk_size", # For hierarchical splitting of topics into chunks
         type=int,
-        default=DEFAULT_CHUNK_SIZE,
-        help="Max tokens per final chunk (default: 1200)."
+        default=DEFAULT_CHUNK_SIZE, # This is 1200
+        help="Max tokens per final chunk during hierarchical splitting (default: 1200)."
     )
     parser.add_argument(
-        "--lower_threshold",
+        "--lower_threshold", # For final, optional chunk merging
         type=int,
-        default=LOWER_THRESHOLD,
-        help="Min tokens to consider merging small final chunks (default: 500)."
+        default=LOWER_THRESHOLD, # This is 500
+        help="Min tokens to consider merging small final chunks if --merge_chunks is enabled (default: 500)."
     )
     parser.add_argument(
-        "--merge_threshold",
+        "--merge_threshold", # For final, optional chunk merging (similarity)
         type=float,
-        default=MERGE_THRESHOLD,
-        help="Cosine similarity threshold for merging adjacent small final chunks (default: 0.3)."
+        default=MERGE_THRESHOLD, # This is 0.3
+        help="Cosine similarity threshold for merging adjacent small final chunks if --merge_chunks is enabled (default: 0.3)."
     )
     parser.add_argument(
         "--use_llm_stoplist",
@@ -442,8 +697,8 @@ def unified_main():
     parser.add_argument(
         "--drop_empty_headers",
         action="store_true",
-        default=False,
-        help="If set, skip writing any final chunk that is only a header."
+        default=False, # Keep this default from main_splitter.py
+        help="If set, skip writing any final chunk that is only a header (default: False)."
     )
     parser.add_argument(
         "--output_dir",
@@ -452,16 +707,22 @@ def unified_main():
         help="Directory to write final chunked .md files (default: ./final_output)."
     )
     parser.add_argument(
+        "--save_intermediate_topics",
+        action="store_true",
+        default=False,
+        help="If set, save the intermediate topic files to disk (default: False, process in memory)."
+    )
+    parser.add_argument(
         "--merge_chunks",
         action="store_true",
         default=True,
         help="Enable merging of small chunk files in the deepest subdirectories."
     )
     parser.add_argument(
-        "--max_merged_chunk_tokens",
+        "--max_merged_chunk_tokens", # For final, optional chunk merging
         type=int,
         default=1200,
-        help="Maximum token count for a merged chunk file (default: 1200)."
+        help="Maximum token count for a merged chunk file if --merge_chunks is enabled (default: 1200)."
     )
 
     args = parser.parse_args()
@@ -498,70 +759,96 @@ def unified_main():
 
     total_written = 0
     # total_topics_processed = 0 # Or just use len(md_files) later
+    # The 'total_written' will now count actual final chunks if mode=='md',
+    # or embeddable data items if mode=='embed'.
+    # It will be incremented inside the topic loop.
+    processed_items_count = 0
 
-    abs_input_dir = os.path.abspath(args.input_path if os.path.isdir(args.input_path) else os.path.dirname(args.input_path))
 
-
-    for md_path in md_files: # md_path from os.walk is already absolute. If single file, it's made absolute below.
-        current_md_path_abs = os.path.abspath(md_path) # Ensure absolute for robustness
-
-        relative_topic_file_path = os.path.relpath(current_md_path_abs, abs_input_dir)
-        mirrored_structure_path = os.path.dirname(relative_topic_file_path)
-        topic_slug_from_filename = os.path.splitext(os.path.basename(current_md_path_abs))[0]
-
-        if mirrored_structure_path == "" or mirrored_structure_path == ".":
-            final_topic_chunk_dir = os.path.join(args.output_dir, topic_slug_from_filename)
-        else:
-            final_topic_chunk_dir = os.path.join(args.output_dir, mirrored_structure_path, topic_slug_from_filename)
-
-        # The following print statements for path verification can be commented out if too verbose later
-        # print(f"--- Processing topic file: {current_md_path_abs} ---")
-        # print(f"  Absolute input dir for relpath: {abs_input_dir}")
-        # print(f"  Relative path to topic file: {relative_topic_file_path}")
-        # print(f"  Mirrored structure path: {mirrored_structure_path}")
-        # print(f"  Topic slug: {topic_slug_from_filename}")
-        # print(f"  Target chunk output directory: {final_topic_chunk_dir}")
+    for current_md_path_abs in md_files: # md_path is already absolute from earlier logic
+        print(f"\n--- Processing source file: {current_md_path_abs} ---")
 
         try:
-            print(f"Processing topic file: {current_md_path_abs} -> into {final_topic_chunk_dir}")
-            os.makedirs(final_topic_chunk_dir, exist_ok=True)
-
             with open(current_md_path_abs, "r", encoding="utf-8") as f:
-                topic_text_content = f.read()
+                full_file_content = f.read()
+        except Exception as e:
+            print(f"Error reading source file {current_md_path_abs}: {e}")
+            continue # Skip to next file
 
-            final_chunks_data = process_topic_text(
-                topic_slug=topic_slug_from_filename,
-                topic_text=topic_text_content,
-                original_filename=relative_topic_file_path, # Using relative path for metadata
+        # Call split_into_topics (now part of this file)
+        topics_data = split_into_topics(
+            full_file_content,
+            min_heading_count=args.min_heading_count,
+            max_split_level=args.max_split_level,
+            tfidf_threshold=args.tfidf_threshold, # This is for topic merging
+            reintegrate_code=args.reintegrate_code
+        )
+
+        # Determine base input directory for relative path calculations
+        if os.path.isdir(args.input_path):
+            base_input_for_relpath = os.path.abspath(args.input_path)
+        else: # Single file input
+            base_input_for_relpath = os.path.dirname(os.path.abspath(args.input_path))
+
+        # Relative path of the original MD file (directory part)
+        relative_dir_of_original_md = os.path.relpath(os.path.dirname(current_md_path_abs), base_input_for_relpath)
+        if relative_dir_of_original_md == ".":
+            relative_dir_of_original_md = "" # Avoids './' in path for cleaner output paths
+
+        original_md_filename_base = os.path.splitext(os.path.basename(current_md_path_abs))[0]
+        original_md_filename_slug = slugify(original_md_filename_base) # Use the slugify function now in this file
+
+        # Path for saving intermediate topics (if enabled)
+        # Using Path object for cleaner path construction
+        intermediate_topics_base_dir = Path(args.output_dir + "_topics_intermediate")
+
+        if args.save_intermediate_topics:
+            current_intermediate_topic_dir = intermediate_topics_base_dir / relative_dir_of_original_md / original_md_filename_slug
+            os.makedirs(current_intermediate_topic_dir, exist_ok=True)
+            print(f"[INFO] Saving {len(topics_data)} intermediate topics for '{current_md_path_abs}' to '{current_intermediate_topic_dir}'")
+            for topic_slug_val, topic_text_val in topics_data:
+                try:
+                    with open(current_intermediate_topic_dir / f"{topic_slug_val}.md", "w", encoding="utf-8") as tf:
+                        tf.write(topic_text_val)
+                except Exception as e:
+                     print(f"Error writing intermediate topic file {topic_slug_val}.md: {e}")
+
+        print(f"Processing {len(topics_data)} topics from file: {current_md_path_abs}")
+        for topic_slug_val, topic_text_val in topics_data:
+            output_dir_for_this_topic_chunks = Path(args.output_dir) / relative_dir_of_original_md / original_md_filename_slug / topic_slug_val
+            os.makedirs(output_dir_for_this_topic_chunks, exist_ok=True)
+
+            path_for_metadata = os.path.relpath(current_md_path_abs, base_input_for_relpath)
+
+            # Call process_topic_text
+            final_chunks_data_for_topic = process_topic_text(
+                topic_slug=topic_slug_val,
+                topic_text=topic_text_val,
+                original_filename=path_for_metadata,
                 mode=args.mode,
                 chunk_size=args.chunk_size,
-                lower_threshold=args.lower_threshold,
-                merge_threshold=args.merge_threshold,
-                use_llm_stoplist=args.use_llm_stoplist,
-                output_dir=final_topic_chunk_dir,
+                lower_threshold=args.lower_threshold, # For final chunk merging in process_topic_text (if mode=embed)
+                merge_threshold=args.merge_threshold,   # For final chunk merging in process_topic_text (if mode=embed)
+                use_llm_stoplist=args.use_llm_stoplist, # This arg seems unused in process_topic_text
+                output_dir=str(output_dir_for_this_topic_chunks),
                 drop_empty_headers=args.drop_empty_headers
             )
 
             if args.mode == "md":
-                num_files_written_for_topic = 0
-                if os.path.exists(final_topic_chunk_dir):
-                    num_files_written_for_topic = len(os.listdir(final_topic_chunk_dir))
-
-                # print(f"  {num_files_written_for_topic} chunk files written for topic {topic_slug_from_filename} in {final_topic_chunk_dir}")
-                total_written += num_files_written_for_topic
+                # process_topic_text writes files directly. We need to count them if we want total_written.
+                # For simplicity, let's count how many files were created in output_dir_for_this_topic_chunks
+                try:
+                    if os.path.exists(output_dir_for_this_topic_chunks):
+                         processed_items_count += len(os.listdir(output_dir_for_this_topic_chunks))
+                except Exception as e:
+                    print(f"Error counting files in {output_dir_for_this_topic_chunks}: {e}")
             else: # mode == "embed"
-                total_written += len(final_chunks_data)
-                # print(f"  {len(final_chunks_data)} embed chunks generated for topic {topic_slug_from_filename}")
+                 processed_items_count += len(final_chunks_data_for_topic)
 
-        except Exception as e:
-            print(f"Error processing topic file {current_md_path_abs}: {e}")
-            # import traceback
-            # traceback.print_exc()
 
-    # Update final summary prints
     # Update final summary prints
     if args.mode == "md":
-        print(f"\nTotal initial chunked Markdown files written: {total_written} under base directory '{args.output_dir}'.")
+        print(f"\nTotal final Markdown chunk files written: {processed_items_count} under base directory '{args.output_dir}'.")
     else: # mode == "embed"
         print(f"\nTotal embedded chunks generated: {total_written} from {len(md_files)} topic files.")
 
