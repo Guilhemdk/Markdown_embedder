@@ -1,0 +1,4 @@
+User-agent: TestBot
+Crawl-delay: 5
+User-agent: *
+Crawl-delay: 1
