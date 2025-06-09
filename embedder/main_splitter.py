@@ -151,7 +151,8 @@ def process_topic_text(
                     sec_num = ".".join(str(x) for x in prev_nums)
                 else:
                     sec_num = "1"
-            chunk_id = f"{cluster}_{topic}_sec{sec_num}"
+            # Modified chunk_id to include start line
+            chunk_id = f"{cluster}_{topic}_sec{sec_num}_L{chunk['start_line']}"
 
             # 7d) Build section_hierarchy from headings appearing before this chunk
             ancestors = [h["heading_text"] for h in headings if h["line_no"] <= chunk["start_line"]]
@@ -161,8 +162,9 @@ def process_topic_text(
             keywords = extract_keywords(text, custom_stop)
             description = extract_description(text)
 
+            # Ensure metadata uses the new unique chunk_id
             metadata = {
-                "id": chunk_id,
+                "id": chunk_id, # Updated chunk_id
                 "cluster": cluster,
                 "topic": topic,
                 "title": own_heading,
