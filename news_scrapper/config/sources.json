@@ -1,0 +1,30 @@
+{
+  "sources": [
+    {
+      "name": "Example Times",
+      "base_url": "https://www.example.com",
+      "rss_feed": "https://www.example.com/rss",
+      "sections": [
+        {
+          "name": "politics",
+          "url": "https://www.example.com/politics"
+        }
+      ],
+      "crawl_interval_minutes": 15,
+      "parser_config": "example_times_parser"
+    },
+    {
+      "name": "Global News",
+      "base_url": "https://globalnews.org",
+      "rss_feed": null,
+      "sections": [
+        {
+          "name": "world",
+          "url": "https://globalnews.org/world"
+        }
+      ],
+      "crawl_interval_minutes": 60,
+      "parser_config": "global_news_parser"
+    }
+  ]
+}

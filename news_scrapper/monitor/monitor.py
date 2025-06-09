@@ -1,37 +1,38 @@
 """
 This module contains the Monitor component.
 The Monitor is responsible for watching for failures, changes in site structure,
-or indications of being rate-limited or blocked. It also handles general logging.
+or indications of being rate-limited or blocked. It also handles general logging
+and basic checks like article newness. It can also interact with Planner's
+crawl delay settings upon detecting rate limits.
 """
 import datetime
-import json # For potentially more structured details
+import json
+from datetime import timezone, timedelta
+from urllib.parse import urlparse
 
 class Monitor:
     """
-    Handles logging, failure reporting, and detection of potential issues
-    like site changes or rate limiting.
+    Handles logging, failure reporting, detection of potential issues,
+    and can adjust crawl delays via a Planner reference upon rate limiting.
     """
-    def __init__(self, log_to_console=True):
+    def __init__(self, log_to_console=True, planner_reference=None):
         """
         Initializes the Monitor.
         Args:
             log_to_console (bool): If True, prints log events to the console.
+            planner_reference (Planner, optional): A reference to the Planner instance
+                                                   to allow feedback (e.g., adjusting crawl delays).
         """
         self.event_log = []
         self.log_to_console = log_to_console
+        self.planner_reference = planner_reference # Could also be just the crawl_delays_cache dict
 
-    def log_event(self, event_type, message, details=None):
-        """
-        Logs an event with a timestamp.
-        Args:
-            event_type (str): Type of event (e.g., "INFO", "WARNING", "ERROR", "CRITICAL", "DEBUG").
-            message (str): The main message for the event.
-            details (dict, optional): Additional structured details about the event. Defaults to None.
-        """
+    def _log_event(self, level, message, details=None): # Renamed to avoid conflict with log_event method
+        # ... (existing _log_event method - no changes specified for it here) ...
         timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
         log_entry = {
             "timestamp": timestamp,
-            "type": event_type.upper(),
+            "type": event_type.upper() if isinstance(event_type:=level, str) else "UNKNOWN", # Python 3.8+
             "message": message,
             "details": details if details is not None else {}
         }
@@ -42,134 +43,175 @@ class Monitor:
             if log_entry['details']:
                 try:
                     details_str = json.dumps(log_entry['details'])
-                except TypeError: # Handle non-serializable details gracefully
+                except TypeError:
                     details_str = str(log_entry['details'])
 
             print(f"[{log_entry['timestamp']}] [{log_entry['type']}] {log_entry['message']}" + (f" | Details: {details_str}" if details_str else ""))
 
 
+    def log_event(self, event_type, message, details=None): # Public method
+        # This is the method that should be called externally.
+        # The one above can be renamed to _internal_log_event or similar if needed,
+        # but for now, let's assume _log_event was a typo for the internal call.
+        # For consistency, I'll assume the one taking `level` was meant to be `_log_event_internal`
+        # and this is the public one.
+        # Let's fix the internal one to avoid confusion.
+        self._internal_log_event_formatter(event_type, message, details)
+
+    def _internal_log_event_formatter(self, event_type_str, message, details=None):
+        """Formats and appends a log entry, prints to console if enabled."""
+        timestamp = datetime.datetime.now(timezone.utc).isoformat()
+        log_entry = {
+            "timestamp": timestamp,
+            "type": event_type_str.upper(),
+            "message": message,
+            "details": details if details is not None else {}
+        }
+        self.event_log.append(log_entry)
+
+        if self.log_to_console:
+            details_json_str = ""
+            if log_entry['details']:
+                try:
+                    details_json_str = json.dumps(log_entry['details']) # Ensure details are serializable for consistency
+                except TypeError: # Fallback if details contain non-serializable items
+                    details_json_str = str(log_entry['details'])
+
+            print(f"[{log_entry['timestamp']}] [{log_entry['type']}] {log_entry['message']}" +
+                  (f" | Details: {details_json_str}" if details_json_str else ""))
+
+
     def report_failure(self, component_name, error_message, url=None, error_details=None):
-        """
-        Reports a failure in one of the scraper components. This is a specialized log_event.
-        Args:
-            component_name (str): Name of the component that failed (e.g., "Fetcher", "Parser").
-            error_message (str): Description of the error.
-            url (str, optional): The URL being processed when the failure occurred. Defaults to None.
-            error_details (dict, optional): Additional details specific to the error.
-        """
+        # ... (existing report_failure method) ...
         details = error_details if error_details is not None else {}
         details['component'] = component_name
-        if url:
-            details['url'] = url
+        if url: details['url'] = url
+        self.log_event("ERROR", f"Component '{component_name}' failed: {error_message}", details)
 
-        message = f"Component '{component_name}' encountered an error: {error_message}"
-        self.log_event("ERROR", message, details)
 
     def check_site_change(self, url, old_indicator, new_indicator, indicator_type="hash"):
-        """
-        Compares an old and new indicator (e.g., content hash, structural hash)
-        to detect significant changes in a website's structure or content.
-        Args:
-            url (str): The URL of the site being checked.
-            old_indicator (str): The old indicator value.
-            new_indicator (str): The new indicator value.
-            indicator_type (str): Description of what the indicator represents (e.g., "content_hash", "structure_hash").
-        Returns:
-            bool: True if a change is detected, False otherwise.
-        """
+        # ... (existing check_site_change method) ...
         if old_indicator != new_indicator:
-            self.log_event("WARNING", f"Potential site change detected for {url} based on {indicator_type}.",
+            self.log_event("WARNING", f"Potential site change for {url} by {indicator_type}.",
                            {"url": url, f"old_{indicator_type}": old_indicator, f"new_{indicator_type}": new_indicator})
             return True
-        # self.log_event("INFO", f"No site change detected for {url} based on {indicator_type}.")
         return False
 
     def is_rate_limited(self, component_name, source_identifier, http_status_code=None, content_snippet=None):
         """
-        Assesses if the scraper might be rate-limited or blocked.
-        This could be based on HTTP status codes (e.g., 429, 503), CAPTCHAs in content, or specific error messages.
+        Assesses if the scraper might be rate-limited or blocked and attempts to increase crawl delay.
         Args:
-            component_name (str): The component that encountered the potential rate limiting (e.g., "Fetcher").
-            source_identifier (str): URL, domain, or IP that might be rate-limited.
-            http_status_code (int, optional): The HTTP status code received.
-            content_snippet (str, optional): A snippet of the received content to check for CAPTCHAs or block messages.
+            source_identifier (str): URL or domain that might be rate-limited.
+            Other args as before.
         Returns:
             bool: True if rate limiting is suspected, False otherwise.
         """
+        is_limited = False
         details = {"component": component_name, "source": source_identifier}
-        if http_status_code:
-            details["status_code"] = http_status_code
-        if content_snippet:
-            # In a real scenario, you might truncate or hash the snippet if it's too long for logs
-            details["content_snippet_preview"] = content_snippet[:200]
+        if http_status_code: details["status_code"] = http_status_code
+        # Truncate content_snippet for logging if it's too long
+        if content_snippet: details["content_snippet_preview"] = content_snippet[:200]
 
-        # Rule 1: HTTP 429 (Too Many Requests) or 503 (Service Unavailable) are strong indicators
-        if http_status_code in [429, 503]:
-            self.log_event("CRITICAL",
-                           f"Rate limiting strongly suspected for '{source_identifier}' (Component: {component_name}). HTTP Status: {http_status_code}.",
-                           details)
-            return True
-
-        # Rule 2: Check for common CAPTCHA or block-related keywords in content
-        if content_snippet:
-            block_keywords = ["captcha", "are you a robot", "access denied", "verify you are human", "to continue please"]
+        if http_status_code in [429, 503]: # Common rate-limiting/busy codes
+            self.log_event("CRITICAL", f"Rate limiting strongly suspected for '{source_identifier}'. HTTP Status: {http_status_code}.", details)
+            is_limited = True
+        elif content_snippet:
+            block_keywords = ["captcha", "are you a robot", "access denied", "verify you are human", "to continue please", "too many requests"]
             for keyword in block_keywords:
                 if keyword in content_snippet.lower():
-                    self.log_event("CRITICAL",
-                                   f"Rate limiting or block suspected for '{source_identifier}' (Component: {component_name}). Found keyword: '{keyword}'.",
-                                   details)
-                    return True
+                    self.log_event("CRITICAL", f"Rate limiting/block suspected for '{source_identifier}'. Found keyword: '{keyword}'.", details)
+                    is_limited = True
+                    break
 
-        # self.log_event("DEBUG", f"No clear sign of rate limiting for '{source_identifier}' by '{component_name}'.", details)
-        return False
+        if is_limited and self.planner_reference and hasattr(self.planner_reference, 'crawl_delays_cache'):
+            domain_to_penalize = None
+            try:
+                # source_identifier could be a full URL or just a domain.
+                parsed_url = urlparse(source_identifier)
+                if parsed_url.netloc:
+                    domain_to_penalize = parsed_url.netloc
+                elif '.' in source_identifier: # Simple check if it might be a domain string
+                    domain_to_penalize = source_identifier
+            except Exception as e:
+                self.log_event("ERROR", f"Could not parse domain from source_identifier '{source_identifier}' for rate limit penalty: {e}")
+
+            if domain_to_penalize:
+                current_delay = self.planner_reference.crawl_delays_cache.get(domain_to_penalize, 1) # Default to 1s if not set
+                new_delay = min(current_delay * 2, 300) # Double delay, max 5 minutes
+                if new_delay == current_delay and current_delay > 1: # If already high, increment by a fixed amount
+                    new_delay = min(current_delay + 60, 300)
+
+
+                self.planner_reference.crawl_delays_cache[domain_to_penalize] = new_delay
+                self.log_event("WARNING", f"Applied rate limit penalty: Increased crawl delay for domain '{domain_to_penalize}' to {new_delay}s.",
+                               {"domain": domain_to_penalize, "old_delay": current_delay, "new_delay": new_delay})
+            else:
+                 self.log_event("WARNING", "Rate limit detected, but could not determine domain to apply penalty.", {"source_identifier": source_identifier})
+
+        return is_limited
+
+
+    def is_article_new_by_date(self, article_id, published_date_utc, recency_delta_days=2):
+        # ... (existing is_article_new_by_date method) ...
+        details = {"article_id": article_id, "recency_delta_days": recency_delta_days}
+        if published_date_utc is None:
+            self.log_event("WARNING", "Article has no published date, considering it new by default.", details)
+            return True
+        if not isinstance(published_date_utc, datetime.datetime):
+            self.log_event("ERROR", "Invalid published_date_utc (not a datetime object).", details); return True
+        if published_date_utc.tzinfo is None or published_date_utc.tzinfo.utcoffset(None) != timezone.utc.utcoffset(None) :
+            self.log_event("WARNING", "Published date not UTC aware. Assuming UTC.", details)
+        now_utc = datetime.datetime.now(timezone.utc)
+        is_new = published_date_utc >= (now_utc - timedelta(days=recency_delta_days))
+        details.update({"published_date_utc": published_date_utc.isoformat(), "is_new": is_new})
+        self.log_event("DEBUG", f"Article newness check by date: {is_new}.", details)
+        return is_new
 
     def get_event_log(self, last_n=None):
-        """
-        Retrieves logged events.
-        Args:
-            last_n (int, optional): If provided, returns only the last N events.
-        Returns:
-            list: A list of log entry dictionaries.
-        """
-        if last_n is not None and isinstance(last_n, int) and last_n > 0:
-            return self.event_log[-last_n:]
-        return self.event_log
+        # ... (existing get_event_log method) ...
+        return self.event_log[-last_n:] if last_n and isinstance(last_n, int) and last_n > 0 else self.event_log
 
     def clear_log(self):
-        """Clears all events from the log."""
+        # ... (existing clear_log method) ...
         self.event_log = []
         self.log_event("INFO", "Event log cleared.")
 
 
 if __name__ == '__main__':
-    monitor = Monitor()
+    # Mock Planner and its crawl_delays_cache for testing Monitor's feedback loop
+    class MockPlanner:
+        def __init__(self):
+            self.crawl_delays_cache = {"example.com": 1, "test-domain.org": 5}
+            print(f"MockPlanner initialized with delays: {self.crawl_delays_cache}")
 
-    monitor.log_event("INFO", "Scraper process starting up.", {"pid": 12345})
-    monitor.log_event("DEBUG", "Configuration loaded successfully.", {"config_path": "/etc/scraper.conf"})
-    monitor.log_event("WARNING", "Network latency detected.", {"avg_latency_ms": 1200})
+        def _log_event(self, level, message, details=None): # Mock a log for planner if needed
+            print(f"[MockPlanner-{level}] {message} {details if details else ''}")
 
-    monitor.report_failure("Fetcher", "Connection timeout after 3 retries",
-                           url="http://nonexistent.example.com",
-                           error_details={"retries": 3, "timeout_seconds": 30})
+    mock_planner_instance = MockPlanner()
 
-    monitor.report_failure("Parser", "Required HTML element not found",
-                           url="http://example.com/article/123",
-                           error_details={"element_selector": "div.article-content", "parser_version": "v1.2"})
+    # Pass the mock_planner_instance to the Monitor
+    monitor = Monitor(planner_reference=mock_planner_instance)
 
-    monitor.check_site_change("http://example.com/home", "hash_v1_0_0", "hash_v1_0_1", indicator_type="layout_hash")
-    monitor.check_site_change("http://example.com/product/1", "content_hash_abc", "content_hash_xyz", indicator_type="product_data_hash")
+    monitor.log_event("INFO", "Monitor test with MockPlanner reference.")
 
-    monitor.is_rate_limited("Fetcher", "http://api.example.com/data", http_status_code=200)
-    monitor.is_rate_limited("Fetcher", "http://api.example.com/data", http_status_code=429)
-    monitor.is_rate_limited("Fetcher", "http://example.com/login", content_snippet="Please verify you are human by completing the CAPTCHA.")
-    monitor.is_rate_limited("Fetcher", "http://example.com/anotherpage", content_snippet="Normal content here, nothing suspicious.")
+    print("\n--- Testing Monitor: Rate Limiting Feedback ---")
+    # Test 1: Rate limit detected for a known domain
+    monitor.is_rate_limited("Fetcher", "http://example.com/some/path", http_status_code=429)
+    print(f"  Crawl delays after example.com rate limit: {mock_planner_instance.crawl_delays_cache}")
+    # Expected: example.com delay should increase (e.g., to 2)
+
+    # Test 2: Rate limit for a new domain
+    monitor.is_rate_limited("Fetcher", "https://newsite.net/api", http_status_code=503)
+    print(f"  Crawl delays after newsite.net rate limit: {mock_planner_instance.crawl_delays_cache}")
+    # Expected: newsite.net delay should be added (e.g., to 2, as default was 1 * 2)
+
+    # Test 3: Rate limit by content keyword
+    monitor.is_rate_limited("Fetcher", "www.another-domain.com", content_snippet="Please complete the CAPTCHA to continue.")
+    print(f"  Crawl delays after another-domain.com CAPTCHA: {mock_planner_instance.crawl_delays_cache}")
+
+    # Test 4: Rate limit again on example.com to see further increase
+    monitor.is_rate_limited("Fetcher", "example.com", http_status_code=429) # Pass domain directly
+    print(f"  Crawl delays after second example.com rate limit: {mock_planner_instance.crawl_delays_cache}")
 
 
-    print(f"\n--- Last 5 Events from Log ({len(monitor.get_event_log())} total) ---")
-    for log_entry in monitor.get_event_log(last_n=5):
-        print(f"  {log_entry['timestamp']} [{log_entry['type']}] {log_entry['message']}")
-
-    monitor.clear_log()
-    print(f"\nLog size after clearing: {len(monitor.get_event_log())}")
-
-```
+    print("\n--- Monitor __main__ tests (including rate limiting feedback) finished ---")

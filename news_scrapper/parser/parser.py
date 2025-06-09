@@ -1,163 +1,227 @@
 """
 This module contains the Parser component.
 The Parser is responsible for transforming raw HTML/JSON into clean, structured data.
-It uses crawl4ai for intelligent content extraction.
+It uses crawl4ai for intelligent content extraction and BeautifulSoup/feedparser for specific tasks,
+and provides utilities for parsing robots.txt directives like Crawl-delay.
 """
 from crawl4ai import WebCrawler
-from crawl4ai.web_crawler import Url # Correct import for Url
+from crawl4ai.web_crawler import Url
+from bs4 import BeautifulSoup
+import urllib.parse
+import feedparser
+from datetime import datetime, timezone, timedelta
+import time
+from dateutil import parser as dateutil_parser
+
 
 class Parser:
     """
-    Parses HTML content to extract structured data using crawl4ai.
+    Parses HTML, RSS feeds, sitemaps, and provides robots.txt parsing utilities.
     """
-    def __init__(self):
-        """
-        Initializes the Parser.
-        Initializes the crawl4ai WebCrawler.
-        """
+    def __init__(self, monitor_instance=None):
+        # ... (existing __init__) ...
+        self.monitor = monitor_instance
         try:
             self.crawler = WebCrawler()
+            self._log_event("INFO", "crawl4ai WebCrawler initialized successfully.")
         except Exception as e:
-            # Handle potential errors during WebCrawler initialization,
-            # e.g., if it tries to download models and fails without internet.
-            print(f"ERROR: Failed to initialize WebCrawler: {e}")
-            print("Ensure that crawl4ai is installed correctly and any necessary models are available.")
+            self._log_event("ERROR", f"Failed to initialize crawl4ai WebCrawler: {e}")
             self.crawler = None
 
+    def _log_event(self, level, message, details=None):
+        # ... (existing _log_event) ...
+        if self.monitor:
+            self.monitor.log_event(level, message, details)
+        else:
+            details_str = f" | Details: {details}" if details else ""
+            print(f"[{level}] {message}{details_str}")
+
+    def _parse_generic_date_to_utc(self, date_input, context_url="N/A"):
+        # ... (existing _parse_generic_date_to_utc) ...
+        if date_input is None: return None
+        if isinstance(date_input, datetime):
+            return date_input.astimezone(timezone.utc) if date_input.tzinfo else date_input.replace(tzinfo=timezone.utc)
+        if isinstance(date_input, str):
+            try:
+                dt = dateutil_parser.parse(date_input)
+                return dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+            except Exception: return None
+        if isinstance(date_input, time.struct_time):
+            try: return datetime.fromtimestamp(time.mktime(date_input), tz=timezone.utc)
+            except Exception: return None
+        return None
 
     def parse_content(self, html_content, url):
-        """
-        Parses the given HTML content to extract news article data.
-        Args:
-            html_content (str): The HTML content of the page.
-            url (str): The URL of the page, used by crawl4ai for context.
-        Returns:
-            dict: A dictionary containing extracted data (e.g., title, text, date),
-                  or None if parsing fails or no significant content is found.
-        """
-        if not self.crawler:
-            print(f"ERROR: Parser not initialized. Cannot parse content for {url}.")
-            return None
-
-        if not html_content:
-            print(f"INFO: No HTML content provided for URL: {url}")
-            return None
-
+        # ... (existing parse_content, ensure it uses _parse_generic_date_to_utc) ...
+        if not self.crawler: self._log_event("ERROR", "Crawler not init.", {"url": url}); return None
+        if not html_content: self._log_event("INFO", "No HTML for parsing.", {"url": url}); return None
         try:
-            # Create a crawl4ai Url object with the pre-fetched HTML content.
-            # crawl4ai's `read` method will then process this content.
-            url_object = Url(url=url, html_content=html_content)
+            res = self.crawler.read(Url(url=url, html_content=html_content))
+            if res and (res.text or res.metadata):
+                date_val = next((res.metadata.get(k) for k in ["date", "publish_date", "published_time", "created_at", "updated_at"] if res.metadata.get(k)), None)
+                return {"url": url, "title": res.metadata.get("title", "N/A"), "text": res.text or None,
+                        "published_date_utc": self._parse_generic_date_to_utc(date_val, url), "raw_metadata": res.metadata}
+        except Exception as e: self._log_event("ERROR", f"crawl4ai parsing error: {e}", {"url": url});
+        return None
 
-            # The read() method processes the content.
-            # It's designed to extract the main content and metadata.
-            result = self.crawler.read(url_object)
+    def find_rss_links_in_html(self, html_content, base_url):
+        # ... (existing find_rss_links_in_html) ...
+        rss_links = []
+        if not html_content: return rss_links
+        try:
+            soup = BeautifulSoup(html_content, 'lxml')
+            for tag in soup.find_all('link', attrs={'rel': 'alternate', 'type': lambda t: t and 'application/rss+xml' in t.lower()}):
+                if href := tag.get('href'): rss_links.append(urllib.parse.urljoin(base_url, href.strip()))
+            for tag in soup.find_all('link', attrs={'type': lambda t: t and 'application/rss+xml' in t.lower()}):
+                if href := tag.get('href'):
+                    full_url = urllib.parse.urljoin(base_url, href.strip())
+                    if full_url not in rss_links: rss_links.append(full_url)
+        except Exception as e: self._log_event("ERROR", f"HTML RSS link parsing error: {e}", {"base_url": base_url})
+        return list(set(rss_links))
 
-            if result and (result.text or result.metadata):
-                # crawl4ai's `result` object typically has:
-                # - result.text: The main textual content of the page.
-                # - result.metadata: A dictionary containing various metadata elements
-                #   like title, author, date, etc. The exact keys can vary.
+    def find_sitemap_links_in_robots(self, robots_txt_content):
+        # ... (existing find_sitemap_links_in_robots) ...
+        sitemap_links = []
+        if not robots_txt_content: return sitemap_links
+        try:
+            for line in robots_txt_content.splitlines():
+                if line.strip().lower().startswith('sitemap:'):
+                    if parts := line.split(':', 1):
+                        if len(parts) > 1 and parts[1].strip(): sitemap_links.append(parts[1].strip())
+        except Exception as e: self._log_event("ERROR", f"robots.txt sitemap link parsing error: {e}")
+        return list(set(sitemap_links))
 
-                title = result.metadata.get("title", "N/A")
-                main_text = result.text if result.text else "N/A"
+    def parse_rss_feed(self, feed_xml_content, feed_url):
+        # ... (existing parse_rss_feed, ensure it uses _parse_generic_date_to_utc) ...
+        if not feed_xml_content: return []
+        parsed = feedparser.parse(feed_xml_content)
+        if parsed.bozo: self._log_event("WARNING", f"Ill-formed RSS feed {feed_url}", {"exc": str(parsed.get("bozo_exception"))})
+        items = []
+        for entry in parsed.entries:
+            link = entry.get('link')
+            if not link: continue
+            date_struct = entry.get('published_parsed') or entry.get('updated_parsed')
+            items.append({"id": entry.get('id', link), "link": link, "title": entry.get('title'),
+                          "published_date_utc": self._parse_generic_date_to_utc(date_struct, feed_url),
+                          "source_feed_url": feed_url, "feed_entry_raw": entry})
+        return items
 
-                # Date extraction can be complex; crawl4ai might provide it in various forms.
-                # Common keys could be 'date', 'publish_date', 'published_time', etc.
-                # We'll check a few common ones or rely on a general one if available.
-                published_date = result.metadata.get("date",
-                                 result.metadata.get("publish_date",
-                                 result.metadata.get("published_time", "N/A")))
+    def parse_sitemap(self, sitemap_xml_content, sitemap_url):
+        # ... (existing parse_sitemap, ensure it uses _parse_generic_date_to_utc) ...
+        if not sitemap_xml_content: return None
+        try:
+            soup = BeautifulSoup(sitemap_xml_content, 'xml')
+            if soup.find('sitemapindex'):
+                urls = [tag.text.strip() for s_tag in soup.find_all('sitemap') if (tag := s_tag.find('loc')) and tag.text]
+                return {'type': 'sitemap_index', 'sitemap_urls': urls, 'source_sitemap_url': sitemap_url} if urls else None
+            elif soup.find('urlset'):
+                items = []
+                for url_tag in soup.find_all('url'):
+                    loc_tag, mod_tag = url_tag.find('loc'), url_tag.find('lastmod')
+                    if loc_tag and loc_tag.text:
+                        items.append({'loc': loc_tag.text.strip(),
+                                      'lastmod_utc': self._parse_generic_date_to_utc(mod_tag.text.strip() if mod_tag and mod_tag.text else None, sitemap_url),
+                                      'source_sitemap_url': sitemap_url})
+                return {'type': 'urlset', 'items': items, 'source_sitemap_url': sitemap_url}
+        except Exception as e: self._log_event("ERROR", f"Sitemap parsing error {sitemap_url}: {e}")
+        return None
 
-                extracted_data = {
-                    "url": url,
-                    "title": title,
-                    "text": main_text,
-                    "published_date": published_date,
-                    "raw_metadata": result.metadata # Include for debugging/further processing
-                }
-                # print(f"DEBUG: Successfully parsed content for {url}. Title: {title}")
-                return extracted_data
-            else:
-                print(f"INFO: Could not extract sufficient data from {url} using crawl4ai.")
-                if result:
-                    print(f"DEBUG: crawl4ai result was present but text or metadata might be empty. Metadata: {result.metadata}, Text empty: {not result.text}")
-                return None
-
-        except Exception as e:
-            print(f"ERROR: Error parsing content for {url} with crawl4ai: {e}")
-            # You might want to log the html_content or parts of it for debugging,
-            # but be careful about log size and sensitive data.
+    def parse_crawl_delay(self, robots_txt_content, target_user_agent="*"):
+        """
+        Parses robots.txt content to find Crawl-delay for a specific user-agent.
+        Args:
+            robots_txt_content (str): The content of the robots.txt file.
+            target_user_agent (str): The user-agent string to look for. Defaults to "*".
+        Returns:
+            float: The crawl delay in seconds, or None if not found.
+        """
+        if not robots_txt_content:
             return None
+
+        lines = robots_txt_content.splitlines()
+        current_agent_match = False
+        target_agent_lower = target_user_agent.lower()
+        wildcard_agent_match = False
+        crawl_delay = None
+        wildcard_crawl_delay = None
+
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            parts = line.split(':', 1)
+            if len(parts) != 2:
+                continue
+
+            directive = parts[0].strip().lower()
+            value = parts[1].strip()
+
+            if directive == 'user-agent':
+                # New user-agent block starts, reset current match state
+                current_agent_match = (value.lower() == target_agent_lower)
+                wildcard_agent_match = (value == '*')
+                if current_agent_match: # Specific agent matched, reset wildcard delay if it was set for a previous block
+                    wildcard_crawl_delay = None
+
+            elif directive == 'crawl-delay':
+                try:
+                    delay_value = float(value)
+                    if current_agent_match: # Matches specific target_user_agent
+                        crawl_delay = delay_value
+                        # Specific agent delay found, this takes precedence. We can even break if we only care about the first match.
+                        # For thoroughness, one might continue to see if other specific blocks redefine it, but usually first one counts.
+                        # For now, let's say the first specific match is taken.
+                        break
+                    elif wildcard_agent_match: # Matches '*'
+                        wildcard_crawl_delay = delay_value
+                except ValueError:
+                    self._log_event("WARNING", f"Invalid Crawl-delay value '{value}' in robots.txt.")
+
+        final_delay = crawl_delay if crawl_delay is not None else wildcard_crawl_delay
+        if final_delay is not None:
+            self._log_event("INFO", f"Found Crawl-delay: {final_delay}s for agent '{target_user_agent if crawl_delay is not None else '*'}'")
+        return final_delay
+
 
 if __name__ == '__main__':
-    # This example requires crawl4ai to be set up and potentially download models.
-    # It might fail in environments without internet access if models aren't cached.
-    print("Initializing Parser...")
-    parser = Parser()
+    monitor_dummy = None
+    parser = Parser(monitor_instance=monitor_dummy)
 
-    if parser.crawler: # Proceed only if crawler was initialized
-        # Example HTML content (very basic, but crawl4ai should handle it)
-        sample_url = "http://example.com/news_article_today"
-        sample_html = """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <title>Big News Today! A Major Event Shakes the World</title>
-            <meta name="description" content="A detailed report on the major event that occurred today.">
-            <meta name="publish-date" content="2023-01-15T10:00:00Z">
-            <meta name="author" content="John Doe">
-        </head>
-        <body>
-            <header>
-                <h1>Important Headline: A Major Event Shakes the World</h1>
-            </header>
-            <article>
-                <p>This is the first paragraph of the article. It describes the initial shock and reactions.</p>
-                <p>Further details emerge about the event, indicating its global impact. Experts are weighing in on the consequences.</p>
-                <section>
-                    <h2>Expert Opinions</h2>
-                    <p>Dr. Jane Smith comments on the economic fallout.</p>
-                </section>
-            </article>
-            <footer>
-                <p>Copyright 2023 News Corp. Published on 2023-01-15.</p>
-            </footer>
-        </body>
-        </html>
-        """
+    print("\n--- Testing Parser: Crawl-delay parsing ---")
+    robots_example_content = """
+    # Example robots.txt
+    User-agent: SpecificBot
+    Crawl-delay: 10
+    Disallow: /private/
 
-        print(f"\nParsing sample content for {sample_url}...")
-        parsed_data = parser.parse_content(sample_html, sample_url)
+    User-agent: *
+    Crawl-delay: 5
+    Disallow: /tmp/
+    Sitemap: http://example.com/sitemap.xml
 
-        if parsed_data:
-            print(f"Successfully parsed data from {sample_url}:")
-            for key, value in parsed_data.items():
-                if key == "text" and isinstance(value, str):
-                    print(f"  {key}: {value[:150].replace('\n', ' ')}...") # Print only first 150 chars of text
-                elif key == "raw_metadata":
-                    print(f"  {key} (type): {type(value)}")
-                    # print(f"  {key} (content): {value}") # Uncomment to see full metadata
-                else:
-                    print(f"  {key}: {value}")
-        else:
-            print(f"Failed to parse data for {sample_url} or no data extracted.")
+    User-agent: AnotherSpecificBot
+    Crawl-delay: 15
+    """
+    delay1 = parser.parse_crawl_delay(robots_example_content, "SpecificBot")
+    print(f"  Delay for SpecificBot: {delay1} (Expected: 10.0)")
+    assert delay1 == 10.0
 
-        print("\nTesting with None (empty) HTML content:")
-        parsed_data_none = parser.parse_content(None, "http://example.com/empty_content_page")
-        if not parsed_data_none:
-            print("Correctly handled None HTML content (returned None).")
+    delay2 = parser.parse_crawl_delay(robots_example_content, "OtherBot") # Should use wildcard
+    print(f"  Delay for OtherBot (uses *): {delay2} (Expected: 5.0)")
+    assert delay2 == 5.0
 
-        # Example of a URL that might be harder for generic parsers if HTML is minimal
-        minimal_html_url = "http://example.com/minimal"
-        minimal_html = "<html><head><title>Minimal Test</title></head><body>Just a sentence.</body></html>"
-        print(f"\nParsing minimal HTML for {minimal_html_url}...")
-        parsed_minimal = parser.parse_content(minimal_html, minimal_html_url)
-        if parsed_minimal:
-            print(f"Parsed data from {minimal_html_url}:")
-            print(f"  Title: {parsed_minimal.get('title')}")
-            print(f"  Text: {parsed_minimal.get('text')}")
-        else:
-            print(f"Failed to parse or extract data from {minimal_html_url}.")
-    else:
-        print("Parser could not be initialized. Skipping __main__ examples.")
+    delay3 = parser.parse_crawl_delay(robots_example_content, "*") # Explicitly wildcard
+    print(f"  Delay for *: {delay3} (Expected: 5.0)")
+    assert delay3 == 5.0
+
+    delay4 = parser.parse_crawl_delay(robots_example_content, "AnotherSpecificBot")
+    print(f"  Delay for AnotherSpecificBot: {delay4} (Expected: 15.0)")
+    assert delay4 == 15.0
+
+    robots_no_delay = "User-agent: *\nDisallow: /"
+    delay_none = parser.parse_crawl_delay(robots_no_delay, "*")
+    print(f"  Delay for no_delay robots: {delay_none} (Expected: None)")
+    assert delay_none is None
+
+    print("\n--- Parser __main__ tests (including crawl-delay) finished ---")

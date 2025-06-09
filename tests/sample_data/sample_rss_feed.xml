@@ -1,0 +1,4 @@
+<rss version="2.0"><channel><title>Test Feed</title>
+<item><title>Item 1</title><link>http://example.com/item1</link><pubDate>Mon, 01 Jan 2024 12:00:00 GMT</pubDate><guid>item1</guid></item>
+<item><title>Item 2</title><link>http://example.com/item2</link><pubDate>Tue, 02 Jan 2024 13:00:00 +0000</pubDate><guid>item2</guid></item>
+</channel></rss>

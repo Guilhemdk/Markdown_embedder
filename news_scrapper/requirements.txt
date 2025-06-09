@@ -1,2 +1,6 @@
 requests
 crawl4ai
+beautifulsoup4
+lxml
+feedparser
+python-dateutil

@@ -1,0 +1,10 @@
+# For running tests and development
+# coverage # For test coverage reporting (use coveragepy if that's the package name)
+# pylint
+# flake8
+# pytest (alternative to unittest runner)
+
+# If you want to run coverage:
+# pip install coverage
+# coverage run -m unittest discover -s tests -p "test_*.py"
+# coverage report -m
