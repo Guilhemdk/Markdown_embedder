@@ -194,13 +194,60 @@ def is_header_only_chunk(text: str) -> bool:
         return True
     return False
 
+def process_single_markdown_file(md_file_path: str, base_input_dir: str, args: argparse.Namespace):
+    """
+    Processes a single Markdown file: reads, splits into topics, and writes output,
+    replicating the input directory structure relative to base_input_dir.
+    """
+    # md_file_path is expected to be absolute
+    relative_path_to_file_dir = os.path.relpath(os.path.dirname(md_file_path), base_input_dir)
+    filename_no_ext = os.path.splitext(os.path.basename(md_file_path))[0]
+
+    if relative_path_to_file_dir == ".":
+        file_specific_output_dir = os.path.join(args.output_dir, filename_no_ext)
+    else:
+        file_specific_output_dir = os.path.join(args.output_dir, relative_path_to_file_dir, filename_no_ext)
+
+    print(f"Processing file: {md_file_path} -> into {file_specific_output_dir}")
+
+    # 1) Read the full Markdown
+    with open(md_file_path, "r", encoding="utf-8") as f:
+        full_text = f.read()
+
+    # 2) Split into topic chunks
+    # Ensure split_into_topics and is_header_only_chunk are accessible (module level)
+    topics = split_into_topics(
+        full_text,
+        min_heading_count=args.min_heading_count,
+        max_split_level=args.max_split_level,
+        tfidf_threshold=args.tfidf_threshold,
+        reintegrate_code=args.reintegrate_code
+    )
+
+    # 3) Write each (slug, chunk_text) to output_dir, optionally dropping empty-header chunks
+    # This will be refined in a later step to create subdirectories per input file if needed.
+    os.makedirs(file_specific_output_dir, exist_ok=True)
+    written = 0
+    for slug, text in topics:
+        if args.drop_empty_headers and is_header_only_chunk(text):
+            continue
+        filename = f"{slug}.md"
+        # For now, all topic files go into the root of args.output_dir
+        # Consider prefixing slug with md_file_path basename to avoid collisions if not handled by caller
+        outpath = os.path.join(file_specific_output_dir, filename)
+        with open(outpath, "w", encoding="utf-8") as outf:
+            outf.write(text)
+        written += 1
+
+    print(f"Wrote {written} topic file(s) from '{md_file_path}' into '{file_specific_output_dir}'.")
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Split a Markdown file into per-topic subfiles (ignore code comments as headings)."
+        description="Split a Markdown file or files in a directory into per-topic subfiles." # Updated description
     )
     parser.add_argument(
         "file_path",
-        help="Path to the input Markdown file."
+        help="Path to the input Markdown file or a directory containing Markdown files." # Updated help
     )
     parser.add_argument(
         "--output_dir",
@@ -241,35 +288,55 @@ def main():
 
     args = parser.parse_args()
 
-    # 1) Read the full Markdown
-    if not os.path.isfile(args.file_path):
-        print(f"Error: File not found: {args.file_path}")
+    # Check if input is a file or directory
+    if not os.path.exists(args.file_path):
+        print(f"Error: Input path not found: {args.file_path}")
         sys.exit(1)
-    with open(args.file_path, "r", encoding="utf-8") as f:
-        full_text = f.read()
 
-    # 2) Split into topic chunks
-    topics = split_into_topics(
-        full_text,
-        min_heading_count=args.min_heading_count,
-        max_split_level=args.max_split_level,
-        tfidf_threshold=args.tfidf_threshold,
-        reintegrate_code=args.reintegrate_code
-    )
+    if os.path.isfile(args.file_path):
+        if not args.file_path.lower().endswith(".md"):
+            print(f"Error: Input file '{args.file_path}' is not a Markdown file (.md).")
+            sys.exit(1)
+        print(f"Input is a single Markdown file: {args.file_path}")
+        abs_md_file_path = os.path.abspath(args.file_path)
+        base_input_dir_for_relpath = os.path.dirname(abs_md_file_path)
+        process_single_markdown_file(abs_md_file_path, base_input_dir_for_relpath, args)
 
-    # 3) Write each (slug, chunk_text) to output_dir, optionally dropping empty-header chunks
-    os.makedirs(args.output_dir, exist_ok=True)
-    written = 0
-    for slug, text in topics:
-        if args.drop_empty_headers and is_header_only_chunk(text):
-            continue
-        filename = f"{slug}.md"
-        outpath = os.path.join(args.output_dir, filename)
-        with open(outpath, "w", encoding="utf-8") as outf:
-            outf.write(text)
-        written += 1
+    elif os.path.isdir(args.file_path):
+        print(f"Input is a directory: {args.file_path}")
+        print(f"Scanning directory '{os.path.abspath(args.file_path)}' for Markdown files...") # New message
+        markdown_files_to_process = []
+        base_input_dir = os.path.abspath(args.file_path)
+        for root, dirs, files in os.walk(base_input_dir): # Use absolute path for os.walk
+            for file in files:
+                if file.lower().endswith(".md"):
+                    # os.path.join will correctly join root (already absolute) and file
+                    markdown_files_to_process.append(os.path.join(root, file))
 
-    print(f"Wrote {written} topic file(s) into '{args.output_dir}'.")
+        if not markdown_files_to_process:
+            print(f"No Markdown files (.md) found in directory: {args.file_path}")
+        else:
+            print(f"Found {len(markdown_files_to_process)} Markdown files to process:")
+            for md_file_path_item_for_listing in markdown_files_to_process: # Use a different var name for clarity
+                print(f"  - {md_file_path_item_for_listing}")
+
+            print(f"\nStarting to process {len(markdown_files_to_process)} identified Markdown file(s)...") # New message
+            for md_file_path_item in markdown_files_to_process:
+                # md_file_path_item is already absolute here due to os.walk on absolute base_input_dir
+                # print(f"  Processing: {md_file_path_item}") # This level of detail might be too much now
+                try:
+                    # Pass the absolute path of the item and the absolute base_input_dir
+                    process_single_markdown_file(md_file_path_item, base_input_dir, args)
+                except Exception as e:
+                    print(f"Error processing file {md_file_path_item}: {e}")
+                    # Continue with other files
+            print(f"Finished processing all files in directory.")
+
+    else:
+        print(f"Error: Input path '{args.file_path}' is not a valid file or directory.")
+        sys.exit(1)
+
+    # The previous placeholder print is removed as processing is now invoked.
 
 if __name__ == "__main__":
     main()
