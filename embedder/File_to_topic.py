@@ -18,47 +18,40 @@ def slugify(text: str) -> str:
     text = re.sub(r'__+', '_', text)
     return text.strip('_')
 
-import re
-from typing import Tuple, Dict
-
 def extract_fenced_code(full_text: str) -> Tuple[str, Dict[str, str]]:
-    """
-    Extract all fenced code blocks (```...```) from full_text.
-    Replace each with a placeholder __CODEi__, but only if removing the block does not
-    leave the text all whitespace. If a block is the only content under its heading,
-    it will not be removed, so that code-only topics are never emptied.
-
-    Returns (text_without_code, code_map) where code_map maps "__CODEi__" -> code_block.
-    """
-    code_pattern = re.compile(r'(?ms)(```.*?```)\n?')
+    # Pattern to capture the code block (group 1) and the immediately following newline(s) (group 2)
+    code_pattern = re.compile(r'(?ms)(```.*?```)(\n?)')
     code_map: Dict[str, str] = {}
     idx = 0
 
-    def replacer(match):
-        nonlocal idx
-        block = match.group(1)
+    current_search_start_pos = 0
+    accumulated_parts = []
+    temp_processed_text_for_searching = full_text
+
+    while True:
+        match = code_pattern.search(temp_processed_text_for_searching, pos=current_search_start_pos)
+
+        if not match:
+            accumulated_parts.append(temp_processed_text_for_searching[current_search_start_pos:])
+            break
+
+        block_content_for_map = match.group(1)  # The ```...``` content
+        captured_newline = match.group(2)     # The captured newline(s) or empty string
+
         key = f"__CODE{idx}__"
 
-        # Tentatively remove this block
-        nonlocal tentative_text
-        start, end = match.span()
-        # Build a version of the text with this block removed
-        candidate = tentative_text[:start] + key + "\n" + tentative_text[end:]
-        # If the result is entirely whitespace or blank, do not remove
-        if candidate.strip() == "":
-            return block  # keep the fence as-is
-        # Otherwise, commit to removing it and storing in map
-        code_map[key] = block
+        match_start_offset, match_end_offset = match.span(0) # Span of the entire match
+
+        accumulated_parts.append(temp_processed_text_for_searching[current_search_start_pos:match_start_offset])
+
+        # Replace with key + exactly what was after the ```...``` (the captured newline[s])
+        accumulated_parts.append(key + captured_newline)
+        code_map[key] = block_content_for_map
+
+        current_search_start_pos = match_end_offset
         idx += 1
-        tentative_text = candidate
-        return key + "\n"
 
-    # We need to iteratively apply replacer so it updates tentative_text
-    tentative_text = full_text
-    # Use sub to replace blocks one by one
-    text_no_code = code_pattern.sub(replacer, full_text)
-
-    return text_no_code, code_map
+    return "".join(accumulated_parts), code_map
 
 def reinsert_code(chunk: str, code_map: Dict[str, str]) -> str:
     """
