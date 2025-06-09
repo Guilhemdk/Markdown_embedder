@@ -1,6 +1,21 @@
 import re
 from typing import List, Dict
 import tiktoken
+import logging
+
+# Global log prefix for this module
+LOG_PREFIX = "[MS_TRACE]"
+
+# Helper to log snippets of text
+def log_snippet(log_text, max_len=150):
+    if not isinstance(log_text, str):
+        try:
+            log_text = str(log_text)
+        except:
+            return "[Error converting to string]"
+    if len(log_text) > max_len:
+        return f"{log_text[:max_len // 2]}...{log_text[-(max_len // 2):]}"
+    return log_text
 
 
 def count_tokens(text: str, tokenizer_name: str = "cl100k_base") -> int:
@@ -37,8 +52,7 @@ def forced_sentence_split(long_text: str, max_tokens: int) -> List[str]:
     return forced_sentence_split(part1, max_tokens) + forced_sentence_split(part2, max_tokens)
 
 def split_by_markdown_delimiter(text: str) -> List[str]:
-    # Print the exact input for crucial debugging
-    # print(f"[SBMD_TRACE] Input received: '{text}'") # Can be very verbose
+    print(f"{LOG_PREFIX}  split_by_markdown_delimiter: Input snippet: '{log_snippet(text.strip())}' ({count_tokens(text)} tokens)")
 
     # Check if the entire input string, after stripping, starts with ``` and ends with ```.
     # This is the most direct way to identify if the whole input is one code block.
@@ -48,7 +62,7 @@ def split_by_markdown_delimiter(text: str) -> List[str]:
         # we can check if there are at least two lines or if the content inside is substantial.
         # However, for this fix, the primary goal is: if it looks like a complete block, preserve it.
         # The original 'text' (with its original surrounding whitespace) is returned.
-        # print(f"[SBMD_TRACE] Detected as a whole code block. Input: '{text[:100]}...', Stripped: '{stripped_text[:100]}...'")
+        print(f"{LOG_PREFIX}  split_by_markdown_delimiter: Detected as a whole code block. Returning as 1 part.")
         return [text]
 
     # --- Fallback to previous logic if the above condition is not met ---
@@ -74,31 +88,45 @@ def split_by_markdown_delimiter(text: str) -> List[str]:
     if has_delimiter_split and parts:
         non_empty_parts = [p for p in parts if p]
         if len(non_empty_parts) > 1 or (len(non_empty_parts) == 1 and non_empty_parts[0] != text):
+            print(f"{LOG_PREFIX}  split_by_markdown_delimiter: Found {len(non_empty_parts)} parts after delimiter pattern. Has_delimiter_split: {has_delimiter_split}. Snippets: {[log_snippet(p.strip()) for p in non_empty_parts[:3]]}...")
             return non_empty_parts
         elif not non_empty_parts and text and text.strip():
-            pass
+            # This case implies original text was only delimiters or whitespace around them.
+            print(f"{LOG_PREFIX}  split_by_markdown_delimiter: Delimiter split resulted in no non-empty parts from non-empty text. Original may have been only delimiters.")
+            pass # Fall through to paragraph splitting
         elif not text:
+            print(f"{LOG_PREFIX}  split_by_markdown_delimiter: Input text is empty. Returning empty list.")
             return []
+        # If only one part and it's the same as original, or other edge cases, fall through
+        print(f"{LOG_PREFIX}  split_by_markdown_delimiter: Delimiter pattern found but resulted in 1 part or no effective split. Parts: {len(non_empty_parts)}. Has_delimiter_split: {has_delimiter_split}. Proceeding to paragraph split.")
+
 
     # Paragraph splitting (simplified for clarity, focusing on double newlines with optional whitespace)
     # This part might need the more robust version from worker if issues arise here for non-code text
-    para_parts = re.split(r'(\n\s*\n)', text) # Using the regex that was confirmed to work before simplification attempt.
+    para_parts = re.split(r'(\n\s*\n)', text)
     processed_para_parts = []
-    if len(para_parts) > 1:
+    if len(para_parts) > 1: # Potential split
         current_piece = ""
         for i, piece in enumerate(para_parts):
             current_piece += piece
-            if i % 2 == 1: # It's a delimiter
-                if current_piece.strip():
+            if i % 2 == 1: # It's a delimiter (\n\s*\n)
+                if current_piece.strip(): # Keep the delimiter as part of the preceding paragraph
                     processed_para_parts.append(current_piece)
                 current_piece = ""
-        if current_piece.strip(): # Last piece
+        if current_piece.strip(): # Add the last piece if it's not empty
              processed_para_parts.append(current_piece)
 
-        if not processed_para_parts and text.strip(): # If all parts were whitespace
-            pass
+        print(f"{LOG_PREFIX}  split_by_markdown_delimiter: Found {len(para_parts)} potential para_parts (raw split). Processed into {len(processed_para_parts)} non-empty paragraph parts.")
+        if not processed_para_parts and text.strip(): # If all parts were whitespace or empty after processing
+            print(f"{LOG_PREFIX}  split_by_markdown_delimiter: Paragraph splitting resulted in no processable parts from non-empty text.")
+            pass # Fall through
         elif len(processed_para_parts) > 1 or (processed_para_parts and processed_para_parts[0] != text):
+            # Only return if it actually split into multiple parts or changed the text
+            return_parts_snippets = [log_snippet(p.strip()) for p in processed_para_parts[:3]]
+            print(f"{LOG_PREFIX}  split_by_markdown_delimiter: Returning {len(processed_para_parts)} parts from paragraph split. Snippets: {return_parts_snippets}...")
             return processed_para_parts
+        else:
+            print(f"{LOG_PREFIX}  split_by_markdown_delimiter: Paragraph splitting did not result in a meaningful split ({len(processed_para_parts)} part(s)).")
 
 
     # List item splitting (simplified, placeholder - robust list splitting is complex)
@@ -113,6 +141,8 @@ def split_by_markdown_delimiter(text: str) -> List[str]:
              # if this simplified part causes issues. For now, this is a fallback.
              pass # Fall through, let original text be returned
 
+    return_parts_snippets = [log_snippet(text.strip())] # Only one part if reaches here
+    print(f"{LOG_PREFIX}  split_by_markdown_delimiter: No effective split by delimiter or paragraph. Returning 1 part. Snippet: {return_parts_snippets}...")
     return [text]
 
 # Helper to count lines accurately
@@ -130,7 +160,7 @@ def count_text_lines(text_content: str) -> int:
 
 
 def _split_python_code_by_functions(code_text: str, max_tokens: int, doc_start_line_of_code_block: int) -> List[Dict]:
-    # print(f"[FUNC_SPLIT] Attempting to split code block ({count_text_lines(code_text)} lines, {count_tokens(code_text)} tokens) at original doc line {doc_start_line_of_code_block}")
+    print(f"{LOG_PREFIX}    _split_python_code_by_functions: Input code block ({count_text_lines(code_text)} lines, {count_tokens(code_text)} tokens) starting original doc line {doc_start_line_of_code_block}. Snippet: '{log_snippet(code_text.strip())}'")
 
     # Regex to find 'def' or 'async def' at the beginning of a line, capturing function name.
     # (?P<name>...) creates a named capture group.
@@ -154,7 +184,7 @@ def _split_python_code_by_functions(code_text: str, max_tokens: int, doc_start_l
     matches = list(func_pattern.finditer(code_content_text))
 
     if not matches:
-        # # print(f"[FUNC_SPLIT] No function definitions found in content. Returning original block with fences.")
+        print(f"{LOG_PREFIX}    _split_python_code_by_functions: No function definitions found. Returning original block.")
         num_lines = count_text_lines(code_text) # Original block lines
         end_line = doc_start_line_of_code_block + num_lines - 1 if num_lines > 0 else doc_start_line_of_code_block
         return [{"text": code_text, "own_heading": "Code Block (Full, No Functions)", "start_line": doc_start_line_of_code_block, "end_line": end_line}]
@@ -200,13 +230,13 @@ def _split_python_code_by_functions(code_text: str, max_tokens: int, doc_start_l
             chunks.append(_create_chunk_with_fences(function_content_slice, f"Function: {func_name}", start_of_current_func_content_char))
 
     if not chunks:
-        # # print(f"[FUNC_SPLIT] No chunks created despite finding functions (e.g. all preamble/functions were whitespace). Returning original.")
+        print(f"{LOG_PREFIX}    _split_python_code_by_functions: No chunks created despite finding functions (e.g. all preamble/functions were whitespace). Returning original.")
         num_lines = count_text_lines(code_text)
         end_line = doc_start_line_of_code_block + num_lines - 1 if num_lines > 0 else doc_start_line_of_code_block
         return [{"text": code_text, "own_heading": "Code Block (Full, Error in Splitting by Func)", "start_line": doc_start_line_of_code_block, "end_line": end_line}]
 
     if len(chunks) == 1 and chunks[0]["text"].strip() == code_text.strip():
-        # # print(f"[FUNC_SPLIT] Splitting by function resulted in the original block effectively. No change.")
+        print(f"{LOG_PREFIX}    _split_python_code_by_functions: Splitting by function resulted in the original block effectively. No change.")
         # Ensure original line numbers and heading are preserved if not actually split
         num_lines = count_text_lines(code_text)
         end_line = doc_start_line_of_code_block + num_lines - 1 if num_lines > 0 else doc_start_line_of_code_block
@@ -215,7 +245,8 @@ def _split_python_code_by_functions(code_text: str, max_tokens: int, doc_start_l
         chunks[0]["end_line"] = end_line
         return chunks # Return the single chunk list
 
-    # # print(f"[FUNC_SPLIT] Successfully split code into {len(chunks)} chunks by function.")
+    chunk_func_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+    print(f"{LOG_PREFIX}    _split_python_code_by_functions: Returning {len(chunks)} chunks by function. Details (first 3): {chunk_func_details_log}")
     return chunks
 
 def recursive_split_by_hierarchy_and_delimiters(
@@ -243,315 +274,295 @@ def recursive_split_by_hierarchy_and_delimiters(
     if not text.strip():
         return []
 
-    def log_snippet(log_text, max_len=150):
-        if len(log_text) > max_len:
-            return f"{log_text[:max_len // 2]}...{log_text[-(max_len // 2):]}"
-        return log_text
-
     indent = "  " * _depth
-    # print(f"{indent}[R_SPLIT_DEBUG] Depth {_depth}: Processing lines {start_line}-{end_line}. Input text: {log_snippet(text.strip())}")
+    print(f"{LOG_PREFIX}{indent}Depth {_depth}: Processing lines {start_line}-{end_line}. Input text snippet: '{log_snippet(text.strip())}' ({count_tokens(text)} tokens)")
 
     # 1) Find headings within [start_line, end_line)
     local_headings = [h for h in headings if start_line <= h["line_no"] < end_line]
     if local_headings:
-        heading_details = [(h['heading_text'], h['level']) for h in local_headings]
-        # print(f"{indent}[R_SPLIT_DEBUG] Found {len(local_headings)} local headings: {heading_details}")
+        heading_details = [(h['heading_text'], h['level'], h['line_no']) for h in local_headings]
+        print(f"{LOG_PREFIX}{indent}  Found {len(local_headings)} local headings: {heading_details[:3]}...")
     else:
-        pass
-        # print(f"{indent}[R_SPLIT_DEBUG] No local headings found.")
+        print(f"{LOG_PREFIX}{indent}  No local headings found.")
 
     # 2) If no headings, attempt delimiter or forced split
     if not local_headings:
-        # print(f"{indent}[R_SPLIT_DEBUG] Branch: No local headings.")
-        # If under token limit, return as‐is
+        print(f"{LOG_PREFIX}{indent}  Branch: No local headings.")
         if count_tokens(text) <= max_tokens:
-            # print(f"{indent}[R_SPLIT_DEBUG] Text under token limit ({count_tokens(text)} <= {max_tokens}). Returning as single chunk.")
-            return [{ "text": text, "own_heading": None, "start_line": start_line, "end_line": end_line }]
+            print(f"{LOG_PREFIX}{indent}  Text under token limit ({count_tokens(text)} <= {max_tokens}). Returning as single chunk.")
+            chunks = [{ "text": text, "own_heading": None, "start_line": start_line, "end_line": end_line }]
+            chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+            print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(chunks)} chunks. Details (first 3): {chunk_details_log}")
+            return chunks
 
-        # Try splitting on Markdown delimiters
-        # print(f"{indent}[R_SPLIT_DEBUG] Text over token limit. Calling split_by_markdown_delimiter for: {log_snippet(text.strip())}")
+        print(f"{LOG_PREFIX}{indent}  Text over token limit. Attempting split_by_markdown_delimiter.")
         parts = split_by_markdown_delimiter(text)
-        # print(f"{indent}[R_SPLIT_DEBUG] Parts from delimiter split: {len(parts)}. Snippets: {[log_snippet(p.strip()) for p in parts]}")
+        print(f"{LOG_PREFIX}{indent}  Parts from delimiter split: {len(parts)}. Snippets: {[log_snippet(p.strip()) for p in parts[:3]]}...")
 
-        # If no real split occurred, forced sentence split
         if len(parts) == 1 and parts[0] == text:
-            # print(f"{indent}[R_SPLIT_DEBUG] Delimiter split resulted in no change (1 part equals original text).")
-            # Check if this single, unsplittable part is a code block
+            print(f"{LOG_PREFIX}{indent}  Delimiter split resulted in no change.")
             stripped_part = parts[0].strip()
             if stripped_part.startswith("```") and stripped_part.endswith("```"):
                 code_block_text = parts[0]
-                # EXTREME DEBUG: Print the exact code block text being preserved.
-                # print(f"{indent}[R_SPLIT_DEBUG] FINAL PRESERVATION CHECK for code block at lines {start_line}-{end_line}: '{log_snippet(code_block_text)}'")
-
                 if count_tokens(code_block_text) > 2 * max_tokens:
-                    # print(f"{indent}[R_SPLIT_DEBUG] Code block at lines {start_line}-{end_line} is > 2*max_tokens ({count_tokens(code_block_text)} > {2 * max_tokens}). Attempting function split.")
-                    # Try to split by function definitions
+                    print(f"{LOG_PREFIX}{indent}  Code block > 2*max_tokens ({count_tokens(code_block_text)} > {2 * max_tokens}). Attempting function split for block at lines {start_line}-{end_line}.")
                     function_chunks = _split_python_code_by_functions(code_block_text, max_tokens, start_line)
-                    # If _split_python_code_by_functions returns more than one chunk,
-                    # it means splitting was successful.
-                    if len(function_chunks) > 1 or (len(function_chunks) == 1 and function_chunks[0]["text"] != code_block_text) : # check if it actually split
-                        # We need to recursively process these function chunks in case they have further structure
-                        # or to ensure they are properly formatted as output chunks.
-                        # For now, let's assume _split_python_code_by_functions
-                        # returns list of dicts that are already in the final chunk format.
-                        # print(f"{indent}[R_SPLIT_DEBUG] Code block at lines {start_line}-{end_line} split into {len(function_chunks)} function(s).")
-                        # To avoid infinite recursion if _split_python_code_by_functions doesn't reduce size or structure:
-                        # We should probably pass these to recursive_split_by_hierarchy_and_delimiters
-                        # For now, directly returning them as per simplified plan.
+                    if len(function_chunks) > 1 or (len(function_chunks) == 1 and function_chunks[0]["text"] != code_block_text) :
+                        chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in function_chunks[:3]]
+                        print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(function_chunks)} chunks from function split. Details: {chunk_details_log}")
                         return function_chunks
                     else:
-                        # Splitting by function didn't work or wasn't effective, return the whole block.
-                        # print(f"{indent}[R_SPLIT_DEBUG] Code block at lines {start_line}-{end_line} is > 2*max_tokens but not effectively split by functions.")
-                        return [{"text": code_block_text, "own_heading": None, "start_line": start_line, "end_line": end_line}]
+                        print(f"{LOG_PREFIX}{indent}  Code block not split by function (or not large enough for it). Returning as is. Lines {start_line}-{end_line}.")
+                        chunks = [{"text": code_block_text, "own_heading": None, "start_line": start_line, "end_line": end_line}]
+                        chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+                        print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(chunks)} chunks. Details (first 3): {chunk_details_log}")
+                        return chunks
                 else:
-                    # Code block is large but not > 2*max_tokens, or it's within limits after all.
-                    # print(f"{indent}[R_SPLIT_DEBUG] Code block at lines {start_line}-{end_line} is not > 2*max_tokens OR already fine. Returning as is.")
-                    return [{"text": code_block_text, "own_heading": None, "start_line": start_line, "end_line": end_line}]
+                    print(f"{LOG_PREFIX}{indent}  Code block not > 2*max_tokens or already fine. Returning as is. Lines {start_line}-{end_line}.")
+                    chunks = [{"text": code_block_text, "own_heading": None, "start_line": start_line, "end_line": end_line}]
+                    chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+                    print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(chunks)} chunks. Details (first 3): {chunk_details_log}")
+                    return chunks
 
-            # print(f"{indent}[R_SPLIT_DEBUG] Calling forced_sentence_split for: {log_snippet(text.strip())}")
+            print(f"{LOG_PREFIX}{indent}  Not a code block or code block preserved. Attempting forced_sentence_split.")
             pieces = forced_sentence_split(text, max_tokens)
-            # print(f"{indent}[R_SPLIT_DEBUG] Pieces from forced_sentence_split: {len(pieces)}. Snippets: {[log_snippet(p.strip()) for p in pieces]}")
+            print(f"{LOG_PREFIX}{indent}  Pieces from forced_sentence_split: {len(pieces)}. Snippets: {[log_snippet(p.strip()) for p in pieces[:3]]}...")
 
             chunks = []
             offset = 0
+            doc_lines_in_text = text.count("\n")
             for i, piece in enumerate(pieces):
-                sub_end = start_line + piece.count("\n") + offset # piece.count("\n") might not be perfect for line counts if piece is not raw lines
-                # If forced split didn’t shrink, bail out
-                if piece == text:
-                    # print(f"{indent}[R_SPLIT_DEBUG] Forced split piece {i} is same as input. Bailing out and returning original text as chunk.")
-                    return [{ "text": text, "own_heading": None, "start_line": start_line, "end_line": end_line }]
+                # Estimate line numbers more carefully
+                piece_lines = piece.count("\n")
+                sub_start_abs = start_line + offset
+                sub_end_abs = start_line + offset + piece_lines
+                if i == len(pieces) -1 : # last piece
+                    sub_end_abs = start_line + doc_lines_in_text # Ensure it goes to the end of original text's line span
 
-                # print(f"{indent}[R_SPLIT_DEBUG] Recursing on forced piece {i} (lines approx {start_line + offset}-{sub_end}): {log_snippet(piece.strip())}")
+                if piece == text and len(pieces) == 1: # Avoid infinite loop if forced_split returns original
+                     print(f"{LOG_PREFIX}{indent}  Forced split piece is same as input. Bailing.")
+                     chunks = [{ "text": text, "own_heading": None, "start_line": start_line, "end_line": end_line }]
+                     break
+
+                print(f"{LOG_PREFIX}{indent}  Recursing on forced piece {i} (approx lines {sub_start_abs}-{sub_end_abs}). Snippet: '{log_snippet(piece.strip())}' ({count_tokens(piece)} tokens)")
                 chunks.extend(recursive_split_by_hierarchy_and_delimiters(
                     piece, headings,
-                    start_line + offset, sub_end,
+                    sub_start_abs, sub_end_abs,
                     max_tokens, _depth + 1
                 ))
-                offset += piece.count("\n") # This is a simplification for line counting
-            # print(f"{indent}[R_SPLIT_DEBUG] Returning {len(chunks)} chunks from forced split recursion.")
+                offset += piece_lines
+                if i < len(pieces) -1 : # Add one for the newline that separated this piece from next
+                    offset +=1
+
+            chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+            print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(chunks)} chunks from forced split recursion. Details (first 3): {chunk_details_log}")
             return chunks
 
-        # True delimiter split; recurse on each part
-        # print(f"{indent}[R_SPLIT_DEBUG] Delimiter split resulted in {len(parts)} parts. Recursing on each.")
         chunks = []
-        curr_line = start_line
+        curr_abs_line = start_line
+        text_lines_processed_in_parts = 0
         for i, part in enumerate(parts):
-            sub_end = curr_line + part.count("\n")
-            if part == text: # Should ideally not happen if len(parts) > 1
-                # print(f"{indent}[R_SPLIT_DEBUG] Delimiter part {i} is same as input. Bailing out and returning original text as chunk.")
-                return [{ "text": text, "own_heading": None, "start_line": start_line, "end_line": end_line }]
+            part_lines = part.count("\n")
+            sub_start_abs = curr_abs_line
+            sub_end_abs = curr_abs_line + part_lines
 
-            # print(f"{indent}[R_SPLIT_DEBUG] Recursing on delimiter part {i} (lines approx {curr_line}-{sub_end}): {log_snippet(part.strip())}")
+            if part == text and len(parts) == 1: # Should not happen if split was effective
+                print(f"{LOG_PREFIX}{indent}  Delimiter part is same as input. Bailing.")
+                chunks = [{ "text": text, "own_heading": None, "start_line": start_line, "end_line": end_line }]
+                break
+
+            print(f"{LOG_PREFIX}{indent}  Recursing on delimiter part {i} (approx lines {sub_start_abs}-{sub_end_abs}). Snippet: '{log_snippet(part.strip())}' ({count_tokens(part)} tokens)")
             sub_chunks = recursive_split_by_hierarchy_and_delimiters(
                 part, headings,
-                curr_line, sub_end,
+                sub_start_abs, sub_end_abs,
                 max_tokens, _depth + 1
             )
             chunks.extend(sub_chunks)
-            curr_line = sub_end
-        # print(f"{indent}[R_SPLIT_DEBUG] Returning {len(chunks)} chunks from delimiter part recursion.")
+            curr_abs_line = sub_end_abs
+            if i < len(parts) -1: # Account for the implicit newline delimiter if not the last part
+                 # This assumes split_by_markdown_delimiter parts are separated by something that implies a line break.
+                 # Or, more accurately, the line numbers of parts should be calculated based on their content from original text.
+                 # The previous line counting `curr_line = sub_end` was problematic.
+                 # For now, `sub_end_abs` becomes the next `sub_start_abs`.
+                 pass
+
+
+        chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+        print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(chunks)} chunks from delimiter part recursion. Details (first 3): {chunk_details_log}")
         return chunks
 
     # 3) There are headings. Find the lowest level among them.
-    # print(f"{indent}[R_SPLIT_DEBUG] Branch: Headings found.")
     min_level = min(h["level"] for h in local_headings)
     splits = [h for h in local_headings if h["level"] == min_level]
-    split_details = [(s['heading_text'], s['line_no']) for s in splits]
-    # print(f"{indent}[R_SPLIT_DEBUG] Min heading level: {min_level}. Found {len(splits)} headings at this level: {split_details}")
+    # print(f"{LOG_PREFIX}{indent}  Min heading level: {min_level}. Found {len(splits)} headings at this level: {[(s['heading_text'], s['line_no']) for s in splits[:3]]}...")
+
 
     # 4) Guard: if exactly one heading at start_line, skip heading-based split
     if len(splits) == 1 and splits[0]["line_no"] == start_line:
         current_heading_text = splits[0]["heading_text"]
-        # print(f"{indent}[R_SPLIT_DEBUG] Single heading '{current_heading_text}' at start_line {start_line}. Processing as a single block with this heading.")
-        if count_tokens(text) <= max_tokens:
-            # print(f"{indent}[R_SPLIT_DEBUG] Text under token limit ({count_tokens(text)} <= {max_tokens}). Returning as single chunk with heading.")
-            return [{ "text": text, "own_heading": current_heading_text, "start_line": start_line, "end_line": end_line }]
+        print(f"{LOG_PREFIX}{indent}  Branch: Single heading guard for '{splits[0]['heading_text']}' at line {start_line}.")
 
-        # Try Markdown delimiters
-        # print(f"{indent}[R_SPLIT_DEBUG] Text over token limit. Calling split_by_markdown_delimiter for: {log_snippet(text.strip())}")
+        if count_tokens(text) <= max_tokens:
+            print(f"{LOG_PREFIX}{indent}  (Single heading) Text under token limit ({count_tokens(text)} <= {max_tokens}). Returning as single chunk with heading.")
+            chunks = [{ "text": text, "own_heading": current_heading_text, "start_line": start_line, "end_line": end_line }]
+            chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+            print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(chunks)} chunks. Details (first 3): {chunk_details_log}")
+            return chunks
+
+        print(f"{LOG_PREFIX}{indent}  (Single heading) Text over token limit. Attempting split_by_markdown_delimiter.")
         parts = split_by_markdown_delimiter(text)
-        # print(f"{indent}[R_SPLIT_DEBUG] Parts from delimiter split: {len(parts)}. Snippets: {[log_snippet(p.strip()) for p in parts]}")
+        print(f"{LOG_PREFIX}{indent}  (Single heading) Parts from delimiter split: {len(parts)}. Snippets: {[log_snippet(p.strip()) for p in parts[:3]]}...")
 
         if len(parts) == 1 and parts[0] == text:
-            # print(f"{indent}[R_SPLIT_DEBUG] Delimiter split resulted in no change.")
-            # Check if this single, unsplittable part is a code block
+            print(f"{LOG_PREFIX}{indent}  (Single heading) Delimiter split resulted in no change.")
             stripped_part = parts[0].strip()
             if stripped_part.startswith("```") and stripped_part.endswith("```"):
                 code_block_text = parts[0]
-                # EXTREME DEBUG: Print the exact code block text being preserved.
-                # print(f"{indent}[R_SPLIT_DEBUG] FINAL PRESERVATION CHECK for code block (under heading '{current_heading_text}') at lines {start_line}-{end_line}: '{log_snippet(code_block_text)}'")
-
                 if count_tokens(code_block_text) > 2 * max_tokens:
-                    # print(f"{indent}[R_SPLIT_DEBUG] Code block (under heading) at lines {start_line}-{end_line} is > 2*max_tokens ({count_tokens(code_block_text)} > {2 * max_tokens}). Attempting function split.")
+                    print(f"{LOG_PREFIX}{indent}  (Single heading) Code block > 2*max_tokens. Attempting function split for block at lines {start_line}-{end_line}.")
                     function_chunks = _split_python_code_by_functions(code_block_text, max_tokens, start_line)
                     if len(function_chunks) > 1 or (len(function_chunks) == 1 and function_chunks[0]["text"] != code_block_text):
-                        # print(f"{indent}[R_SPLIT_DEBUG] Code block (under heading) at lines {start_line}-{end_line} split into {len(function_chunks)} function(s).")
-                        # Associate heading with these new chunks if they don't have one
                         for fc in function_chunks:
-                            if fc.get("own_heading") is None or fc.get("own_heading") == "Code Block (Function Splitting Placeholder)": # Updated placeholder text
-                                fc["own_heading"] = current_heading_text
+                             if fc.get("own_heading") is None or "Code Block" in fc.get("own_heading", "") : fc["own_heading"] = current_heading_text
+                        chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in function_chunks[:3]]
+                        print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(function_chunks)} chunks from function split. Details: {chunk_details_log}")
                         return function_chunks
-                    else:
-                        # print(f"{indent}[R_SPLIT_DEBUG] Code block (under heading) at lines {start_line}-{end_line} > 2*max_tokens but not effectively split by functions.")
-                        return [{"text": code_block_text, "own_heading": current_heading_text, "start_line": start_line, "end_line": end_line}]
-                else:
-                    # print(f"{indent}[R_SPLIT_DEBUG] Code block (under heading) at lines {start_line}-{end_line} is not > 2*max_tokens OR already fine. Returning as is.")
-                    return [{"text": code_block_text, "own_heading": current_heading_text, "start_line": start_line, "end_line": end_line}]
+                    else: # Not split by function or not effective
+                        print(f"{LOG_PREFIX}{indent}  (Single heading) Code block not split by function. Returning as is. Lines {start_line}-{end_line}.")
+                        chunks = [{"text": code_block_text, "own_heading": current_heading_text, "start_line": start_line, "end_line": end_line}]
+                        chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+                        print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(chunks)} chunks. Details (first 3): {chunk_details_log}")
+                        return chunks
+                else: # Code block not > 2 * max_tokens
+                    print(f"{LOG_PREFIX}{indent}  (Single heading) Code block not > 2*max_tokens. Returning as is. Lines {start_line}-{end_line}.")
+                    chunks = [{"text": code_block_text, "own_heading": current_heading_text, "start_line": start_line, "end_line": end_line}]
+                    chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+                    print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(chunks)} chunks. Details (first 3): {chunk_details_log}")
+                    return chunks
 
-            # print(f"{indent}[R_SPLIT_DEBUG] Calling forced_sentence_split for: {log_snippet(text.strip())}")
+            print(f"{LOG_PREFIX}{indent}  (Single heading) Not a code block or preserved. Attempting forced_sentence_split.")
             pieces = forced_sentence_split(text, max_tokens)
-            # print(f"{indent}[R_SPLIT_DEBUG] Pieces from forced_sentence_split: {len(pieces)}. Snippets: {[log_snippet(p.strip()) for p in pieces]}")
+            print(f"{LOG_PREFIX}{indent}  (Single heading) Pieces from forced_sentence_split: {len(pieces)}. Snippets: {[log_snippet(p.strip()) for p in pieces[:3]]}...")
             chunks = []
             offset = 0
+            doc_lines_in_text = text.count("\n")
             for i, piece in enumerate(pieces):
-                sub_end = start_line + piece.count("\n") + offset
-                if piece == text:
-                    # print(f"{indent}[R_SPLIT_DEBUG] Forced split piece {i} is same as input. Bailing out.")
-                    return [{ "text": text, "own_heading": current_heading_text, "start_line": start_line, "end_line": end_line }]
+                piece_lines = piece.count("\n")
+                sub_start_abs = start_line + offset
+                sub_end_abs = start_line + offset + piece_lines
+                if i == len(pieces) -1 : sub_end_abs = start_line + doc_lines_in_text
 
-                # print(f"{indent}[R_SPLIT_DEBUG] Recursing on forced piece {i} (lines approx {start_line + offset}-{sub_end}): {log_snippet(piece.strip())}")
-                # Note: Passing current_heading_text down here might be incorrect if the piece doesn't actually belong to it.
-                # However, the structure implies this whole block is under this one heading.
-                # For more precise heading association, recursive calls might need to pass None for heading if piece is not the start.
-                # For now, keeping it simple and associating the original heading.
+                if piece == text and len(pieces) == 1:
+                    print(f"{LOG_PREFIX}{indent}  (Single heading) Forced split piece is same as input. Bailing.")
+                    chunks = [{ "text": text, "own_heading": current_heading_text, "start_line": start_line, "end_line": end_line }]
+                    break
+
+                print(f"{LOG_PREFIX}{indent}  (Single heading) Recursing on forced piece {i} (approx lines {sub_start_abs}-{sub_end_abs}). Snippet: '{log_snippet(piece.strip())}' ({count_tokens(piece)} tokens)")
                 temp_chunks = recursive_split_by_hierarchy_and_delimiters(
-                    piece, headings, # Should these headings be filtered or is it ok?
-                    start_line + offset, sub_end,
-                    max_tokens, _depth + 1
-                )
-                # If sub-chunks don't have their own heading, associate the current one.
+                    piece, headings, sub_start_abs, sub_end_abs, max_tokens, _depth + 1 )
                 for tc in temp_chunks:
-                    if tc.get("own_heading") is None:
-                        tc["own_heading"] = current_heading_text
+                    if tc.get("own_heading") is None: tc["own_heading"] = current_heading_text
                 chunks.extend(temp_chunks)
-                offset += piece.count("\n")
-            # print(f"{indent}[R_SPLIT_DEBUG] Returning {len(chunks)} chunks from forced split recursion (single heading guard).")
+                offset += piece_lines
+                if i < len(pieces) -1 : offset +=1
+
+            chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+            print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(chunks)} chunks from forced split (single heading). Details: {chunk_details_log}")
             return chunks
 
-        # True delimiter split; recurse
-        # print(f"{indent}[R_SPLIT_DEBUG] Delimiter split resulted in {len(parts)} parts. Recursing on each (single heading guard).")
+        # True delimiter split (single heading context)
         chunks = []
-        curr_line = start_line
+        curr_abs_line = start_line # This needs to be absolute from document start
         for i, part in enumerate(parts):
-            sub_end = curr_line + part.count("\n")
-            if part == text:
-                # print(f"{indent}[R_SPLIT_DEBUG] Delimiter part {i} is same as input. Bailing out.")
-                return [{ "text": text, "own_heading": current_heading_text, "start_line": start_line, "end_line": end_line }]
+            part_lines = part.count("\n")
+            sub_start_abs = curr_abs_line
+            sub_end_abs = curr_abs_line + part_lines
 
-            # print(f"{indent}[R_SPLIT_DEBUG] Recursing on delimiter part {i} (lines approx {curr_line}-{sub_end}): {log_snippet(part.strip())}")
-            # Similar heading association logic as above
+            if part == text and len(parts) == 1: # Should not happen
+                print(f"{LOG_PREFIX}{indent}  (Single heading) Delimiter part is same as input. Bailing.")
+                chunks = [{ "text": text, "own_heading": current_heading_text, "start_line": start_line, "end_line": end_line }]
+                break
+
+            print(f"{LOG_PREFIX}{indent}  (Single heading) Recursing on delimiter part {i} (approx lines {sub_start_abs}-{sub_end_abs}). Snippet: '{log_snippet(part.strip())}' ({count_tokens(part)} tokens)")
             temp_chunks = recursive_split_by_hierarchy_and_delimiters(
-                part, headings,
-                curr_line, sub_end,
-                max_tokens, _depth + 1
-            )
+                part, headings, sub_start_abs, sub_end_abs, max_tokens, _depth + 1 )
             for tc in temp_chunks:
-                if tc.get("own_heading") is None: # Only if it didn't find its own deeper heading
-                    # Check if the part starts with the original heading text. Unlikely for delimiter parts.
-                    # More likely, these parts are content between headings or delimiters.
-                    # The current 'current_heading_text' is the one for the whole block.
-                    tc["own_heading"] = current_heading_text # Associate with the main heading of this block
+                if tc.get("own_heading") is None: tc["own_heading"] = current_heading_text
             chunks.extend(temp_chunks)
+            curr_abs_line = sub_end_abs # Next part starts where this one ended (line-wise)
+            # Need to ensure line accounting is correct from original `text` string for `curr_abs_line` if parts don't include all newlines.
 
-            curr_line = sub_end
-        # print(f"{indent}[R_SPLIT_DEBUG] Returning {len(chunks)} chunks from delimiter part recursion (single heading guard).")
+        chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+        print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(chunks)} chunks from delimiter recursion (single heading). Details: {chunk_details_log}")
         return chunks
 
     # 5) Otherwise, split on all headings at min_level
-    # print(f"{indent}[R_SPLIT_DEBUG] Branch: Splitting by {len(splits)} headings of level {min_level}.")
+    print(f"{LOG_PREFIX}{indent}  Branch: Splitting by {len(splits)} headings of level {min_level}. Headings: {[(s['heading_text'], s['line_no']) for s in splits[:3]]}...")
     chunks = []
-    # Iterate up to the last heading to define segments.
-    # The text before the first split heading (if any) needs to be handled.
-    # This part of logic might be complex; the original code implies text starts with a heading or is processed before.
-    # Assuming the text passed to this function starts at or before the first `h` in `splits`.
 
-    # Let's refine how text is passed to recursive calls when splitting by headings.
-    # The text from `start_line` to `splits[0]['line_no']` is content before the first split-level heading.
-    # It should be processed if it's not empty and not already covered.
-
-    current_pos_in_text = 0 # Relative to input `text`
-    effective_start_line = start_line
+    # Iterate through the split points (headings at min_level)
+    # The text for each sub-problem starts at a heading `h` and ends just before the next heading `splits[i+1]`
+    # or at `end_line` if `h` is the last heading in `splits`.
 
     for i, h in enumerate(splits):
-        # Segment before current heading `h`
-        # `h['line_no']` is absolute. `effective_start_line` is absolute.
-        # The text for the segment *before* this heading `h`
-        heading_start_line_in_full_doc = h["line_no"]
-
-        # Find where this heading `h` starts within the current `text`
-        # This requires careful line counting or string searching.
-        # The original `sub_lines = text.splitlines()[sub_start - start_line : next_boundary - start_line]`
-        # implies that `text` is the full block for this level.
-
-        # We are splitting the current `text` based on `splits`.
-        # The first chunk is from the beginning of `text` to the start of `splits[0]`.
-        # Subsequent chunks are from `splits[i]` to `splits[i+1]`.
-        # The last chunk is from `splits[-1]` to the end of `text`.
-
-        # This part of the original code seems to iterate through split points (headings)
-        # and create sub_text for recursion.
-        # `sub_start` is absolute line no of current heading `h`.
-        # `next_boundary` is absolute line no of next heading in `splits` or `end_line`.
-
-        # Text for the chunk associated with heading `h`
         sub_start_abs = h["line_no"]
-
-        # Determine end of this chunk
-        # If this is the last heading in `splits`, chunk goes to `end_line`
-        # Otherwise, it goes to `splits[i+1]['line_no']`
         sub_end_abs = splits[i+1]["line_no"] if i+1 < len(splits) else end_line
 
-        # Extract the actual text for this segment.
-        # This requires `text` to be correctly mapped to `start_line` and `end_line`.
-        # And `sub_start_abs` and `sub_end_abs` are absolute.
-        # We need lines relative to the current `text` object.
+        # Extract the text segment corresponding to this heading `h`
+        # This requires careful slicing of the original `text` based on absolute line numbers.
+        lines_in_original_text = text.splitlines(keepends=True)
 
-        # Convert absolute line numbers to indices in current `text.splitlines()`
-        lines_of_text = text.splitlines(keepends=True)
+        # Calculate start and end indices for slicing `lines_in_original_text`
+        # `start_line` is the absolute line number of the beginning of `text`
+        slice_start_idx = sub_start_abs - start_line
+        slice_end_idx = sub_end_abs - start_line
 
-        # Offset from the start of the document to the start of the current `text` block
-        doc_offset_to_text_start = start_line
+        # Ensure indices are valid for `lines_in_original_text`
+        slice_start_idx = max(0, min(slice_start_idx, len(lines_in_original_text)))
+        slice_end_idx = max(0, min(slice_end_idx, len(lines_in_original_text)))
 
-        idx_h_start_in_text = sub_start_abs - doc_offset_to_text_start
-        idx_h_end_in_text = sub_end_abs - doc_offset_to_text_start
-
-        # Ensure indices are within bounds of lines_of_text
-        idx_h_start_in_text = max(0, idx_h_start_in_text)
-        idx_h_end_in_text = min(len(lines_of_text), idx_h_end_in_text)
-
-        if idx_h_start_in_text >= idx_h_end_in_text:
-            # print(f"{indent}[R_SPLIT_DEBUG] Heading split: Skipping empty segment for heading '{h['heading_text']}' at line {h['line_no']}.")
+        if slice_start_idx >= slice_end_idx: # Empty segment
+            # print(f"{LOG_PREFIX}{indent}  Skipping empty segment for heading '{h['heading_text']}' (lines {sub_start_abs}-{sub_end_abs})")
             continue
 
-        sub_text_lines = lines_of_text[idx_h_start_in_text:idx_h_end_in_text]
-        sub_text = "".join(sub_text_lines)
+        sub_text = "".join(lines_in_original_text[slice_start_idx:slice_end_idx])
 
         if not sub_text.strip():
-            # print(f"{indent}[R_SPLIT_DEBUG] Heading split: Skipping effectively empty sub_text for heading '{h['heading_text']}' at line {h['line_no']}.")
+            # print(f"{LOG_PREFIX}{indent}  Skipping effectively empty sub_text for heading '{h['heading_text']}' (lines {sub_start_abs}-{sub_end_abs})")
             continue
 
-        # Original bail out: if sub_text is the same as the input text, means no actual split is happening here.
-        # This can occur if `text` consists only of the content under one of the `splits` headings.
-        if sub_text == text and len(splits) == 1 : # only if it's the only split and it's the whole text
-             # print(f"{indent}[R_SPLIT_DEBUG] Heading split: sub_text is same as input text for heading '{h['heading_text']}'. This should have been caught by single heading guard. Returning as is.")
-             # This case should ideally be handled by the "single heading at start_line" guard.
-             # If it reaches here, it means the heading wasn't at the start of `text`.
-             # We associate `h` as its heading.
-             return [{ "text": text, "own_heading": h["heading_text"], "start_line": sub_start_abs, "end_line": sub_end_abs }]
+        # This is the critical check: if sub_text is the same as the input `text` AND we only have one split point `h`,
+        # it means this function was called with `text` that *is* the content under `h`.
+        # This should have been caught by the "single heading guard" if `h` was at `start_line`.
+        # If `h` is not at `start_line` but is the only split, it implies content before `h` was empty or non-existent.
+        if sub_text == text and len(splits) == 1:
+            # This situation should ideally be handled by the single heading guard.
+            # If it occurs, it means the current `text` block is precisely the content of this `h`.
+            # We assign `h`'s text as its own_heading and recurse to break it down further if needed.
+            # However, to prevent infinite loops, if we are here, it implies that the single heading guard
+            # condition (h["line_no"] == start_line) was NOT met.
+            # This means `text` might be *exactly* `sub_text` but `h` is not at `text`'s start.
+            # This is okay, proceed to recurse. The `own_heading` will be `h['heading_text']`.
+            # print(f"{LOG_PREFIX}{indent}  Sub-text for '{h['heading_text']}' is same as input text, but not caught by single guard. Proceeding.")
+            # The recursive call below will handle this. It will become a "single heading at start_line" case for the sub-problem.
+            pass
 
-        # print(f"{indent}[R_SPLIT_DEBUG] Recursing on heading split for '{h['heading_text']}' (lines {sub_start_abs}-{sub_end_abs}): {log_snippet(sub_text.strip())}")
+
+        print(f"{LOG_PREFIX}{indent}  Recursing on heading split for '{h['heading_text']}' (lines {sub_start_abs}-{sub_end_abs}). Snippet: '{log_snippet(sub_text.strip())}' ({count_tokens(sub_text)} tokens)")
         sub_chunks = recursive_split_by_hierarchy_and_delimiters(
-            sub_text, headings, # Pass all headings down, filtering happens at start of call
+            sub_text, headings,
             sub_start_abs, sub_end_abs,
             max_tokens, _depth + 1
         )
-        # The returned sub_chunks should ideally have their own_heading set correctly.
-        # If a sub_chunk is returned and its `own_heading` is None, it means it's content under `h`.
+
+        # Assign owning heading if sub-chunks don't have one (they should, from their own processing)
+        # This is a fallback: normally, the recursive call should set the correct heading.
+        # If a sub_chunk's own_heading is None, it means it's direct content under h.
         for sc in sub_chunks:
             if sc.get("own_heading") is None:
                 sc["own_heading"] = h["heading_text"]
         chunks.extend(sub_chunks)
 
-    final_chunk_snippets = [f"('{log_snippet(c['text'].strip())}', h='{c.get('own_heading')}', lines {c['start_line']}-{c['end_line']})" for c in chunks]
-    # print(f"{indent}[R_SPLIT_DEBUG] Returning {len(chunks)} chunks from heading-based splitting. Snippets: {final_chunk_snippets}")
+    chunk_details_log = [(log_snippet(c['text'].strip()), c.get('own_heading', 'N/A'), c['start_line'], c['end_line']) for c in chunks[:3]]
+    print(f"{LOG_PREFIX}{indent}Depth {_depth}: Returning {len(chunks)} chunks from multi-heading split. Details (first 3): {chunk_details_log}")
     return chunks
