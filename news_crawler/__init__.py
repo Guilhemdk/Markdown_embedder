@@ -3,6 +3,7 @@
 from .fetcher import Fetcher, FetchResult
 from .interpreters import ArticleLinkInterpreter, ArticleInterpreter, ArticleInfo
 from .crawler import NewsCrawler, SitePoller
+from .policy import DomainScanner, DomainRegistry, PermissionLevel, DomainInfo
 
 __all__ = [
     "Fetcher",
@@ -12,4 +13,8 @@ __all__ = [
     "ArticleInfo",
     "NewsCrawler",
     "SitePoller",
+    "DomainScanner",
+    "DomainRegistry",
+    "PermissionLevel",
+    "DomainInfo",
 ]
