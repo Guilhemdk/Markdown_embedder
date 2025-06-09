@@ -272,6 +272,18 @@ def find_deepest_chunk_directories(root_output_dir: str) -> List[str]:
 
 MERGE_LOG_PREFIX = "[MERGE_LOG]"
 
+def _get_section_prefix_from_filename(filename: str) -> str:
+    """
+    Extracts the section prefix from a chunk filename.
+    Example: "memory_topic_sec1_L100.md" -> "memory_topic_sec1"
+    """
+    match = re.match(r"(.*?)_L\d+\.md$", filename)
+    if match:
+        return match.group(1)
+    # Fallback if pattern doesn't match (e.g., already merged file or unexpected format)
+    return os.path.splitext(filename)[0]
+
+
 def _extract_frontmatter_and_content(file_path: str) -> Tuple[str, str]:
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -319,17 +331,19 @@ def merge_files_in_directory(directory_path: str, max_tokens_per_merged_file: in
 
     print(f"{MERGE_LOG_PREFIX} Found {len(md_files)} .md files in {directory_path}.")
 
-    # Convert to full paths
-    md_file_paths = [os.path.join(directory_path, f) for f in md_files]
+    # md_files are just basenames, convert to full paths for processing
+    full_md_file_paths = [os.path.join(directory_path, f) for f in md_files]
 
-    processed_files_for_current_run = set() # Tracks files already part of a merge OR processed as a standalone first file
+    processed_files_for_current_run = set() # Tracks full paths of files already part of a merge OR processed
 
-    for i, first_file_path in enumerate(md_file_paths):
+    for i, first_file_path in enumerate(full_md_file_paths):
         if first_file_path in processed_files_for_current_run:
             continue
 
-        print(f"{MERGE_LOG_PREFIX} Starting new potential merged file with: {os.path.basename(first_file_path)}")
+        first_file_name = os.path.basename(first_file_path)
+        print(f"{MERGE_LOG_PREFIX} Starting new potential merged file with: {first_file_name}")
 
+        first_file_section_prefix = _get_section_prefix_from_filename(first_file_name)
         first_file_frontmatter, first_file_body = _extract_frontmatter_and_content(first_file_path)
 
         if not first_file_frontmatter and first_file_body.strip().startswith("---"):
@@ -351,9 +365,16 @@ def merge_files_in_directory(directory_path: str, max_tokens_per_merged_file: in
         files_in_current_merge_sequence = [first_file_path]
 
         # Try to add subsequent files
-        for next_file_path in md_file_paths[i+1:]:
+        for next_file_path in full_md_file_paths[i+1:]:
             if next_file_path in processed_files_for_current_run:
                 continue
+
+            next_file_name = os.path.basename(next_file_path)
+            next_file_section_prefix = _get_section_prefix_from_filename(next_file_name)
+
+            if next_file_section_prefix != first_file_section_prefix:
+                print(f"{MERGE_LOG_PREFIX} Section changed from '{first_file_section_prefix}' to '{next_file_section_prefix}' (file: {next_file_name}). Finalizing current merge for {first_file_name}.")
+                break # Stop adding to current_merged_file, finalize it
 
             _unused_frontmatter, next_file_body = _extract_frontmatter_and_content(next_file_path)
             tokens_in_next_file = count_tokens(next_file_body)
@@ -361,8 +382,8 @@ def merge_files_in_directory(directory_path: str, max_tokens_per_merged_file: in
             if current_token_count + tokens_in_next_file <= max_tokens_per_merged_file:
                 current_merged_content_parts.append(next_file_body.strip())
                 current_token_count += tokens_in_next_file
-                files_in_current_merge_sequence.append(next_file_path)
-                print(f"{MERGE_LOG_PREFIX} Added {os.path.basename(next_file_path)} to merge sequence starting with {os.path.basename(first_file_path)}")
+                files_in_current_merge_sequence.append(next_file_path) # Store full path
+                print(f"{MERGE_LOG_PREFIX} Added {next_file_name} to merge sequence starting with {first_file_name}")
             else:
                 # Cannot add this file, so stop trying for the current merge sequence
                 break
