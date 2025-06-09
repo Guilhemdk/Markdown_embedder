@@ -59,8 +59,8 @@ def process_topic_text(
     topic = topic_slug
     version_context = parse_version_context(topic_text)
     outline_date = parse_outline_date(topic_text)
-    # We won't use file_path as a real path; we annotate as "original:topic_slug"
-    file_path = f"{os.path.basename(original_filename)}::{topic_slug}"
+    # original_filename is now the relative path to the topic file itself.
+    file_path = original_filename
 
     # 2) Root-level title (first H1 in topic_text)
     root_title = None
@@ -306,97 +306,96 @@ def unified_main():
     # Gather Markdown files from input path
     md_files: List[str] = []
     if os.path.isdir(args.input_path):
-        for fname in os.listdir(args.input_path):
-            if fname.lower().endswith(".md"):
-                md_files.append(os.path.join(args.input_path, fname))
-    else:
-        if args.input_path.lower().endswith(".md"):
-            md_files = [args.input_path]
-        else:
-            print("Error: Input must be a .md file or a directory containing .md files.")
+        print(f"Input is a directory, scanning for .md topic files in: {os.path.abspath(args.input_path)}")
+        for root, _, files in os.walk(args.input_path):
+            for file in files:
+                if file.lower().endswith(".md"):
+                    md_files.append(os.path.join(root, file))
+        if not md_files:
+            print(f"No .md files found in directory {args.input_path}")
+            sys.exit(0) # Or handle as appropriate
+        print(f"Found {len(md_files)} .md files to process:")
+        for f_path in md_files:
+            print(f"  - {f_path}")
+
+    elif os.path.isfile(args.input_path):
+        if not args.input_path.lower().endswith(".md"):
+            print(f"Error: Input file '{args.input_path}' is not a Markdown file (.md).")
             sys.exit(1)
+        print(f"Input is a single .md topic file: {args.input_path}")
+        md_files.append(args.input_path)
+    else:
+        print(f"Error: Input path '{args.input_path}' is not a valid file or directory.")
+        sys.exit(1)
+
 
     total_written = 0
-    total_topics = 0
+    # total_topics_processed = 0 # Or just use len(md_files) later
 
-    for md_path in md_files:
-        base_name = os.path.splitext(os.path.basename(md_path))[0]
-        file_output_dir = os.path.join(args.output_dir, base_name)
-        os.makedirs(file_output_dir, exist_ok=True)
+    abs_input_dir = os.path.abspath(args.input_path if os.path.isdir(args.input_path) else os.path.dirname(args.input_path))
 
-        with open(md_path, "r", encoding="utf-8") as f:
-            full_text = f.read()
 
-        # Phase 1: Split into topics
-        topics = split_into_topics(
-            full_text,
-            min_heading_count=args.min_heading_count,
-            max_split_level=args.max_split_level,
-            tfidf_threshold=args.tfidf_threshold,
-            reintegrate_code=args.reintegrate_code
-        )
+    for md_path in md_files: # md_path from os.walk is already absolute. If single file, it's made absolute below.
+        current_md_path_abs = os.path.abspath(md_path) # Ensure absolute for robustness
 
-        total_topics += len(topics)
+        relative_topic_file_path = os.path.relpath(current_md_path_abs, abs_input_dir)
+        mirrored_structure_path = os.path.dirname(relative_topic_file_path)
+        topic_slug_from_filename = os.path.splitext(os.path.basename(current_md_path_abs))[0]
 
-        # Phase 2: Chunk each topic
-        for topic_slug, topic_text in topics:
-            # Detect if this topic is code-only: if stripped text starts and ends with ```
-            stripped = topic_text.strip()
-            is_code_only = stripped.startswith("```") and stripped.endswith("```")
+        if mirrored_structure_path == "" or mirrored_structure_path == ".":
+            final_topic_chunk_dir = os.path.join(args.output_dir, topic_slug_from_filename)
+        else:
+            final_topic_chunk_dir = os.path.join(args.output_dir, mirrored_structure_path, topic_slug_from_filename)
 
-            topic_dir = os.path.join(file_output_dir, topic_slug)
-            if args.mode == "md":
-                os.makedirs(topic_dir, exist_ok=True)
+        # The following print statements for path verification can be commented out if too verbose later
+        # print(f"--- Processing topic file: {current_md_path_abs} ---")
+        # print(f"  Absolute input dir for relpath: {abs_input_dir}")
+        # print(f"  Relative path to topic file: {relative_topic_file_path}")
+        # print(f"  Mirrored structure path: {mirrored_structure_path}")
+        # print(f"  Topic slug: {topic_slug_from_filename}")
+        # print(f"  Target chunk output directory: {final_topic_chunk_dir}")
 
-            # If code-only, write it directly and skip recursive chunking
-            if is_code_only:
-                if args.mode == "md":
-                    out_file = os.path.join(topic_dir, f"{topic_slug}_raw_code.md")
-                    with open(out_file, "w", encoding="utf-8") as wf:
-                        wf.write(topic_text)
-                    total_written += 1
-                else:
-                    metadata = {
-                        "id": f"memory_{topic_slug}_raw",
-                        "cluster": "memory",
-                        "topic": topic_slug,
-                        "title": None,
-                        "version_context": None,
-                        "outline_date": None,
-                        "section_hierarchy": [],
-                        "keywords": [],
-                        "description": "",
-                        "file_path": f"{os.path.basename(md_path)}::{topic_slug}"
-                    }
-                    # In embed mode, you might collect or print this chunk+meta
-                    total_written += 1
-            if is_code_only:
-                continue
+        try:
+            print(f"Processing topic file: {current_md_path_abs} -> into {final_topic_chunk_dir}")
+            os.makedirs(final_topic_chunk_dir, exist_ok=True)
 
-            # Otherwise, apply recursive chunking + metadata
-            final_chunks = process_topic_text(
-                topic_slug=topic_slug,
-                topic_text=topic_text,
-                original_filename=md_path,
+            with open(current_md_path_abs, "r", encoding="utf-8") as f:
+                topic_text_content = f.read()
+
+            final_chunks_data = process_topic_text(
+                topic_slug=topic_slug_from_filename,
+                topic_text=topic_text_content,
+                original_filename=relative_topic_file_path, # Using relative path for metadata
                 mode=args.mode,
                 chunk_size=args.chunk_size,
                 lower_threshold=args.lower_threshold,
                 merge_threshold=args.merge_threshold,
                 use_llm_stoplist=args.use_llm_stoplist,
-                output_dir=topic_dir,
+                output_dir=final_topic_chunk_dir,
                 drop_empty_headers=args.drop_empty_headers
             )
 
             if args.mode == "md":
-                written_here = len(os.listdir(topic_dir))
-                total_written += written_here
-            else:
-                total_written += len(final_chunks)
+                num_files_written_for_topic = 0
+                if os.path.exists(final_topic_chunk_dir):
+                    num_files_written_for_topic = len(os.listdir(final_topic_chunk_dir))
 
+                # print(f"  {num_files_written_for_topic} chunk files written for topic {topic_slug_from_filename} in {final_topic_chunk_dir}")
+                total_written += num_files_written_for_topic
+            else: # mode == "embed"
+                total_written += len(final_chunks_data)
+                # print(f"  {len(final_chunks_data)} embed chunks generated for topic {topic_slug_from_filename}")
+
+        except Exception as e:
+            print(f"Error processing topic file {current_md_path_abs}: {e}")
+            # import traceback
+            # traceback.print_exc()
+
+    # Update final summary prints
     if args.mode == "md":
-        print(f"Final chunked Markdown files written under '{args.output_dir}'. Total files: {total_written}")
+        print(f"\nTotal chunked Markdown files written: {total_written} under base directory '{args.output_dir}'.")
     else:
-        print(f"Total embedded chunks returned: {total_written} across {total_topics} topics.")
+        print(f"\nTotal embedded chunks generated: {total_written} from {len(md_files)} topic files.")
 
 
 if __name__ == "__main__":
