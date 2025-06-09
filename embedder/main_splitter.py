@@ -454,7 +454,7 @@ def unified_main():
     parser.add_argument(
         "--merge_chunks",
         action="store_true",
-        default=False, # Merging is off by default
+        default=True,
         help="Enable merging of small chunk files in the deepest subdirectories."
     )
     parser.add_argument(
