@@ -3,7 +3,7 @@ import argparse
 import os
 import re
 import sys
-from typing import List, Dict
+from typing import List, Dict, Tuple # Added Tuple
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -35,6 +35,159 @@ from metadata_parser import (
 DEFAULT_CHUNK_SIZE = 1200      # max tokens per chunk
 LOWER_THRESHOLD = 500          # min tokens to consider merging small chunks
 MERGE_THRESHOLD = 0.3          # cosine-sim threshold for merging siblings
+
+
+def find_deepest_chunk_directories(root_output_dir: str) -> List[str]:
+    """
+    Finds all directories within the root_output_dir that contain .md files
+    but no further subdirectories. These are considered the "deepest" directories
+    where actual chunk files reside.
+    """
+    deepest_dirs: List[str] = []
+    for dirpath, dirnames, filenames in os.walk(root_output_dir):
+        has_md_files = any(f.lower().endswith(".md") for f in filenames)
+        is_deepest = not dirnames  # No subdirectories
+
+        if has_md_files and is_deepest:
+            deepest_dirs.append(dirpath)
+    return deepest_dirs
+
+
+MERGE_LOG_PREFIX = "[MERGE_LOG]"
+
+def _extract_frontmatter_and_content(file_path: str) -> Tuple[str, str]:
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+    except Exception as e:
+        print(f"{MERGE_LOG_PREFIX} Error reading file {file_path}: {e}")
+        return "", ""
+
+    if not lines or lines[0].strip() != '---':
+        # No frontmatter or not starting with ---
+        return "", "".join(lines)
+
+    frontmatter_end_index = -1
+    for i, line in enumerate(lines[1:]): # Start searching from the second line
+        if line.strip() == '---':
+            frontmatter_end_index = i + 1 # index in original lines list
+            break
+
+    if frontmatter_end_index != -1:
+        frontmatter = "".join(lines[:frontmatter_end_index + 1]) # Include the closing ---
+        content = "".join(lines[frontmatter_end_index + 1:])
+        return frontmatter, content
+    else:
+        # Opening --- but no closing ---, treat all as content
+        print(f"{MERGE_LOG_PREFIX} Warning: File {file_path} has opening '---' but no closing '---'. Treating all as content.")
+        return "", "".join(lines)
+
+
+def merge_files_in_directory(directory_path: str, max_tokens_per_merged_file: int):
+    print(f"{MERGE_LOG_PREFIX} Starting to process directory: {directory_path}")
+    try:
+        all_files_in_dir = os.listdir(directory_path)
+    except FileNotFoundError:
+        print(f"{MERGE_LOG_PREFIX} Error: Directory not found: {directory_path}")
+        return
+    except Exception as e:
+        print(f"{MERGE_LOG_PREFIX} Error listing files in directory {directory_path}: {e}")
+        return
+
+    md_files = sorted([f for f in all_files_in_dir if f.lower().endswith(".md")])
+
+    if not md_files:
+        print(f"{MERGE_LOG_PREFIX} No .md files found in {directory_path}.")
+        return
+
+    print(f"{MERGE_LOG_PREFIX} Found {len(md_files)} .md files in {directory_path}.")
+
+    # Convert to full paths
+    md_file_paths = [os.path.join(directory_path, f) for f in md_files]
+
+    processed_files_for_current_run = set() # Tracks files already part of a merge OR processed as a standalone first file
+
+    for i, first_file_path in enumerate(md_file_paths):
+        if first_file_path in processed_files_for_current_run:
+            continue
+
+        print(f"{MERGE_LOG_PREFIX} Starting new potential merged file with: {os.path.basename(first_file_path)}")
+
+        first_file_frontmatter, first_file_body = _extract_frontmatter_and_content(first_file_path)
+
+        if not first_file_frontmatter and first_file_body.strip().startswith("---"):
+             # This case can happen if _extract_frontmatter_and_content returns "" for frontmatter
+             # because the file *only* contained frontmatter, or started with --- but had no closing ---.
+             # For a file to be the base of a merge, it should ideally have valid frontmatter.
+             # If first_file_frontmatter is empty, but the body starts with '---', it's likely malformed.
+             # For now, we will use a minimal default frontmatter if the extracted one is empty.
+            print(f"{MERGE_LOG_PREFIX} Warning: File {os.path.basename(first_file_path)} has no valid frontmatter for merging. Using minimal default.")
+            # Minimal valid frontmatter, e.g. if title was expected.
+            # This part might need more sophisticated handling based on expected frontmatter fields.
+            default_title = os.path.splitext(os.path.basename(first_file_path))[0]
+            first_file_frontmatter = f"---\ntitle: {default_title} (merged)\n---\n"
+            # The body is kept as is, if _extract_frontmatter_and_content put everything in body.
+
+        current_merged_content_parts = [first_file_body.strip()]
+        current_token_count = count_tokens(first_file_body)
+
+        files_in_current_merge_sequence = [first_file_path]
+
+        # Try to add subsequent files
+        for next_file_path in md_file_paths[i+1:]:
+            if next_file_path in processed_files_for_current_run:
+                continue
+
+            _unused_frontmatter, next_file_body = _extract_frontmatter_and_content(next_file_path)
+            tokens_in_next_file = count_tokens(next_file_body)
+
+            if current_token_count + tokens_in_next_file <= max_tokens_per_merged_file:
+                current_merged_content_parts.append(next_file_body.strip())
+                current_token_count += tokens_in_next_file
+                files_in_current_merge_sequence.append(next_file_path)
+                print(f"{MERGE_LOG_PREFIX} Added {os.path.basename(next_file_path)} to merge sequence starting with {os.path.basename(first_file_path)}")
+            else:
+                # Cannot add this file, so stop trying for the current merge sequence
+                break
+
+        # Finalize and Write Merged File (always rewrite the first file of the sequence)
+        merged_filename = os.path.basename(first_file_path)
+        output_path = first_file_path # Overwrite the first file
+
+        # Ensure frontmatter ends with a newline
+        if first_file_frontmatter and not first_file_frontmatter.endswith('\n'):
+            first_file_frontmatter += '\n'
+
+        # Join parts with double newline.
+        # The problem description mentioned "\n\n---\n\n" as a potential separator.
+        # Using just "\n\n" between markdown bodies. If a visual separator is desired,
+        # it should be explicitly added here.
+        merged_body_content = "\n\n".join(current_merged_content_parts)
+        final_merged_text = first_file_frontmatter + merged_body_content
+
+        try:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(final_merged_text)
+            print(f"{MERGE_LOG_PREFIX} Written merged file: {merged_filename} ({len(files_in_current_merge_sequence)} files, {current_token_count} tokens)")
+        except Exception as e:
+            print(f"{MERGE_LOG_PREFIX} Error writing merged file {output_path}: {e}")
+            # If writing fails, we should not mark files for deletion or as processed
+            continue
+
+        # Mark all files in this sequence (including the first one) as processed for this run
+        for fp in files_in_current_merge_sequence:
+            processed_files_for_current_run.add(fp)
+
+        # Delete the other original files that were merged into the first file
+        if len(files_in_current_merge_sequence) > 1:
+            for file_to_delete_path in files_in_current_merge_sequence[1:]:
+                try:
+                    os.remove(file_to_delete_path)
+                    print(f"{MERGE_LOG_PREFIX} Deleted original file: {os.path.basename(file_to_delete_path)}")
+                except Exception as e:
+                    print(f"{MERGE_LOG_PREFIX} Error deleting file {os.path.basename(file_to_delete_path)}: {e}")
+
+    print(f"{MERGE_LOG_PREFIX} Finished processing directory: {directory_path}")
 
 
 def process_topic_text(
@@ -298,6 +451,18 @@ def unified_main():
         default="final_output",
         help="Directory to write final chunked .md files (default: ./final_output)."
     )
+    parser.add_argument(
+        "--merge_chunks",
+        action="store_true",
+        default=False, # Merging is off by default
+        help="Enable merging of small chunk files in the deepest subdirectories."
+    )
+    parser.add_argument(
+        "--max_merged_chunk_tokens",
+        type=int,
+        default=1200,
+        help="Maximum token count for a merged chunk file (default: 1200)."
+    )
 
     args = parser.parse_args()
 
@@ -394,10 +559,36 @@ def unified_main():
             # traceback.print_exc()
 
     # Update final summary prints
+    # Update final summary prints
     if args.mode == "md":
-        print(f"\nTotal chunked Markdown files written: {total_written} under base directory '{args.output_dir}'.")
-    else:
+        print(f"\nTotal initial chunked Markdown files written: {total_written} under base directory '{args.output_dir}'.")
+    else: # mode == "embed"
         print(f"\nTotal embedded chunks generated: {total_written} from {len(md_files)} topic files.")
+
+    # --- Optional Chunk Merging Process ---
+    if args.mode == "md" and args.merge_chunks:
+        print(f"\n--- Starting Chunk Merging Process ---")
+        print(f"Scanning for deepest chunk directories in: {args.output_dir}")
+
+        deepest_dirs_to_merge = find_deepest_chunk_directories(args.output_dir)
+
+        if not deepest_dirs_to_merge:
+            print("No deepest directories found containing .md files to merge.")
+        else:
+            print(f"Found {len(deepest_dirs_to_merge)} directories to process for merging.")
+            # Note: The following counts are not implemented as merge_files_in_directory does not return them yet.
+            # merged_files_count_total = 0
+            # deleted_files_count_total = 0
+
+            for dir_to_process in deepest_dirs_to_merge:
+                # merge_files_in_directory prints its own logs using MERGE_LOG_PREFIX
+                merge_files_in_directory(dir_to_process, args.max_merged_chunk_tokens)
+
+            print(f"\n--- Chunk Merging Process Completed ---")
+            # A more detailed summary could be added here if merge_files_in_directory returned statistics.
+            # For now, users should check the [MERGE_LOG] entries.
+            print(f"Please check '{MERGE_LOG_PREFIX}' logs above for details on merged files and deletions.")
+            print(f"The number of files in '{args.output_dir}' may have changed due to merging.")
 
 
 if __name__ == "__main__":
