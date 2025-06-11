@@ -240,10 +240,11 @@ if __name__ == '__main__':
     # Test URLs - replace with actual URLs that have robots.txt for meaningful tests
     # For example, python.org has a robots.txt
     test_urls = [
-        "https://www.python.org/",                  # Should be allowed
-        "https://www.python.org/psf/",             # Should be allowed
-        "https://www.python.org/search/",          # Often disallowed by robots.txt for '*'
-        "http://example.com/nonexistentrobots.txt" # To test 404 handling for robots.txt
+        "https://blog.danielckv.com/unlocking-your-local-llms-a-deep-dive-into-mcp-on-premise-f8def899520c"
+        # "https://www.python.org/",                  # Should be allowed
+        # "https://www.python.org/psf/",             # Should be allowed
+        # "https://www.python.org/search/",          # Often disallowed by robots.txt for '*'
+        # "http://example.com/nonexistentrobots.txt" # To test 404 handling for robots.txt
     ]
     # Note: To truly test disallows, you might need a specific user-agent that python.org disallows from /search/
     # For now, we use default user agents which are typically not disallowed from major paths.

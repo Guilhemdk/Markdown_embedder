@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 import time
 from urllib.parse import urljoin
 
+<<<<<<< HEAD
 try:
     from crawl4ai import WebCrawler, Url
 except ImportError:
@@ -23,6 +24,12 @@ import feedparser # type: ignore[reportMissingImports]
 import extruct
 from bs4 import BeautifulSoup, Tag
 from dateutil import parser as dateutil_parser
+=======
+import asyncio
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+# JsonCssExtractionStrategy might not be used directly if WebCrawler.read doesn't take it for pre-fetched HTML
+from crawl4ai import JsonCssExtractionStrategy
+>>>>>>> fef85e9 (idk)
 
 try:
     from ..analyzer.structure_analyzer import StructureAnalyzer

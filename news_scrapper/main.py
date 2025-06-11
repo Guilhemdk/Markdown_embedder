@@ -14,10 +14,10 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 try:
-    from news_scrapper.planner.planner import Planner
-    from news_scrapper.pipeline.pipeline import Pipeline
-    from news_scrapper.monitor.monitor import Monitor
-    from news_scrapper.config import SOURCES_CONFIG_PATH
+    from planner.planner import Planner
+    from pipeline.pipeline import Pipeline
+    from monitor.monitor import Monitor
+    from config import SOURCES_CONFIG_PATH
 except ImportError as e:
     print(f"Error importing components: {e}. Ensure all components exist and PYTHONPATH is set correctly.")
     print("If running from project root, try 'python -m news_scrapper.main'.")
