@@ -11,7 +11,15 @@
         }
       ],
       "crawl_interval_minutes": 15,
-      "parser_config": "example_times_parser"
+      "parser_config_name": "example_times_parser",
+      "extraction_selectors": {
+        "article_title_selector": "h1.article-title",
+        "article_content_selector": "div.article-body p",
+        "article_author_selector": "span.author-name",
+        "article_date_selector": "time.published-date[datetime]",
+        "article_link_selector_on_index": "a.story-link"
+      },
+      "llm_analysis_pending": false
     },
     {
       "name": "Global News",
@@ -24,7 +32,25 @@
         }
       ],
       "crawl_interval_minutes": 60,
-      "parser_config": "global_news_parser"
+      "parser_config_name": "global_news_parser",
+      "extraction_selectors": null,
+      "llm_analysis_pending": true
+    },
+    {
+      "name": "Placeholder LLM Test Site",
+      "base_url": "http://example.com/llm_test_page",
+      "rss_feed": null,
+      "parser_config_name": "default",
+      "extraction_selectors": null,
+      "llm_analysis_pending": true
+    },
+    {
+      "name": "PythonOrgBlog",
+      "base_url": "https://pyfound.blogspot.com/",
+      "rss_feed": "https://feeds.feedburner.com/PythonSoftwareFoundationNews",
+      "parser_config_name": "default",
+      "extraction_selectors": null,
+      "llm_analysis_pending": false
     }
   ]
 }
