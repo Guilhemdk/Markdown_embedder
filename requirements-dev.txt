@@ -1,10 +1,32 @@
-# For running tests and development
-# coverage # For test coverage reporting (use coveragepy if that's the package name)
-# pylint
-# flake8
-# pytest (alternative to unittest runner)
+# Development and testing dependencies
 
-# If you want to run coverage:
-# pip install coverage
-# coverage run -m unittest discover -s tests -p "test_*.py"
-# coverage report -m
+# For static analysis and linting (choose one or more)
+# flake8
+# pylint
+# mypy # For type checking, often used with Pyright or as an alternative
+# pyright (Typically installed as a Node.js package or VS Code extension, not via pip for CLI use by this name)
+
+# For type stubs (if not provided by the library itself or for older libraries)
+# These are often found in typeshed and installable via pip.
+# Check PyPI for the exact package names if needed.
+# Example:
+# types-python-dateutil
+# types-feedparser
+# types-requests
+# types-lxml
+# types-beautifulsoup4
+
+# For running tests (unittest is built-in)
+# coverage # For test coverage reporting (e.g., `pip install coverage`)
+
+# For formatting
+# black
+# isort
+
+# Other useful tools
+# ipython # For interactive sessions
+# pre-commit # For running checks before commits
+# tox # For testing in multiple environments
+# wheel # For building wheels (though often a build backend like setuptools handles this)
+# build # For building packages (pep517)
+# twine # For uploading packages to PyPI
