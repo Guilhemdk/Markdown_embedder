@@ -12,9 +12,9 @@ from datetime import datetime # For processed_timestamp_utc, though main.py adds
 
 # Attempt to import config values
 try:
-    from .config import RESULTS_DIR, MAX_RESULTS_TO_STORE_IN_MEMORY
+    from ..config import RESULTS_DIR, MAX_RESULTS_TO_STORE_IN_MEMORY # Corrected to ..config
 except ImportError: # Likely running pipeline.py directly or config is not in python path
-    print("Pipeline: Could not import from .config, using default result storage settings.")
+    print("Pipeline: Could not import from ..config, using default result storage settings.")
     # Define defaults if config import fails (e.g. for standalone testing)
     # Determine a sensible default for RESULTS_DIR relative to this file if needed
     # For now, assume it might be set by main.py or test environment
