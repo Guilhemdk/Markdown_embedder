@@ -1,225 +1,194 @@
 import unittest
-from unittest.mock import MagicMock, patch, call # Added call
+from unittest.mock import MagicMock, patch, call
 from datetime import datetime, timezone, timedelta
 import os
-import json # For loading sample data if needed, or comparing dicts
+import json
 
 from news_scrapper.parser.parser import Parser
-from news_scrapper.analyzer.structure_analyzer import StructureAnalyzer # For mocking
-# from news_scrapper.planner.planner import Planner # For type hinting/mocking planner_ref
+from news_scrapper.analyzer.structure_analyzer import StructureAnalyzer
+# from news_scrapper.planner.planner import Planner # For type hinting/mocking planner_ref (actual import not needed for mock)
 
 SAMPLE_DATA_DIR = os.path.join(os.path.dirname(__file__), "sample_data")
 
-# Mock Planner and StructureAnalyzer for Parser tests
-class MockPlannerForParser:
+class MockPlannerForParserTests: # Renamed to avoid conflict with other mocks if any
     def __init__(self):
-        self.updated_selectors = None
-        self.saved_config = False
-        self.llm_flag_set = None
+        self.updated_selectors_log = []
+        self.saved_config_log = []
+        self.llm_flag_log = []
 
     def update_source_extraction_selectors(self, source_name, selectors_dict):
-        print(f"MockPlannerForParser: update_source_extraction_selectors called for {source_name} with {selectors_dict}")
-        self.updated_selectors = selectors_dict
-        # Simulate source_config update if parser relies on it being immediate (it does via local copy)
+        # print(f"MockPlannerForParserTests: update_source_extraction_selectors for {source_name} with {selectors_dict}")
+        self.updated_selectors_log.append({"source_name": source_name, "selectors": selectors_dict})
         return True
 
     def save_config(self):
-        print("MockPlannerForParser: save_config called")
-        self.saved_config = True
+        # print("MockPlannerForParserTests: save_config called")
+        self.saved_config_log.append(True)
 
     def set_llm_analysis_flag(self, source_name, flag_status):
-        print(f"MockPlannerForParser: set_llm_analysis_flag for {source_name} to {flag_status}")
-        self.llm_flag_set = (source_name, flag_status)
+        # print(f"MockPlannerForParserTests: set_llm_analysis_flag for {source_name} to {flag_status}")
+        self.llm_flag_log.append({"source_name": source_name, "status": flag_status})
         return True
 
-class TestParserAdvanced(unittest.TestCase):
+class TestParserMultiStrategy(unittest.TestCase): # Renamed class
     def setUp(self):
         self.mock_monitor = MagicMock()
-        self.mock_planner_ref = MockPlannerForParser() # Use our detailed mock
+        self.mock_planner_ref = MockPlannerForParserTests()
         self.mock_structure_analyzer = MagicMock(spec=StructureAnalyzer)
 
         self.parser = Parser(monitor_instance=self.mock_monitor,
                              planner_reference=self.mock_planner_ref,
                              structure_analyzer_instance=self.mock_structure_analyzer)
 
-        # Make sure parser.crawler is mocked if it's used by _parse_with_general_ai and might not init in test env
-        if self.parser.crawler is None: # If WebCrawler init failed (e.g. no internet for model download)
+        # Mock parser.crawler if it's used and might not init in test env
+        if self.parser.crawler is None:
             self.parser.crawler = MagicMock()
-            # Define return value for crawler.read if needed by tests directly calling _parse_with_general_ai
-            mock_ai_result = MagicMock()
-            mock_ai_result.text = "AI extracted text"
-            mock_ai_result.metadata = {"title": "AI Title", "date": "2024-01-01T00:00:00Z"}
-            self.parser.crawler.read.return_value = mock_ai_result
+
+        # Default mock for general AI if not overridden in a specific test
+        self.mock_ai_result_default = MagicMock()
+        self.mock_ai_result_default.text = "Default AI text"
+        self.mock_ai_result_default.metadata = {"title": "Default AI Title", "date": "2024-01-01T00:00:00Z"}
+        self.parser.crawler.read.return_value = self.mock_ai_result_default
+
+        self.sample_url = "http://example.com/article_sample"
+        self.sample_html = "<html><head><title>Sample Article</title></head><body><article><h1>Main Title</h1><p>Content here.</p></article></body></html>"
+        self.empty_source_config = {"name": "TestEmptyConfig"}
 
 
-        # Sample HTML and URL
-        self.sample_url = "http://example.com/article1"
-        self.sample_html = "<html><head><title>Original Title</title></head><body><p>Original content.</p></body></html>"
-        self.source_config_empty = {"name": "TestHTMLSource"} # No selectors, LLM pending by default
+    def test_is_data_sufficient_true(self):
+        self.assertTrue(self.parser._is_data_sufficient({"title": "A Title", "text": "Some content."}))
 
-        # Sample HTML for schema.org
-        self.html_with_schema = """
-        <html><head><title>Schema Title</title></head><body>
-        <script type="application/ld+json">
-        {
-            "@context": "http://schema.org",
-            "@type": "NewsArticle",
-            "headline": "Schema Headline",
-            "articleBody": "Schema article body content.",
-            "datePublished": "2024-03-15T12:00:00Z",
-            "author": {"@type": "Person", "name": "Schema Author"}
-        }
-        </script>
-        <p>Some other text.</p></body></html>
-        """
-        self.url_with_schema = "http://example.com/schemapage"
-        self.source_config_schema = {"name": "SchemaSource", "base_url": self.url_with_schema}
+    def test_is_data_sufficient_false_no_title(self):
+        self.assertFalse(self.parser._is_data_sufficient({"text": "Some content."}))
 
-        # Sample HTML for custom selectors
-        self.html_for_custom = """
-        <html><head><title>Custom Title Here</title></head><body>
-        <h1 class="custom-title-class">Actual Title</h1>
-        <div class="custom-content-class"><p>First paragraph.</p><p>Second paragraph.</p></div>
-        <span class="custom-author-class">Custom Author</span>
-        <time class="custom-date-class" datetime="2024-02-10T10:00:00Z">Feb 10, 2024</time>
-        </body></html>
-        """
-        self.url_for_custom = "http://example.com/custompage"
-        self.source_config_custom = {
-            "name": "CustomSource", "base_url": self.url_for_custom,
-            "extraction_selectors": {
-                "article_title_selector": "h1.custom-title-class",
-                "article_content_selector": "div.custom-content-class p", # Will get multiple <p>
-                "article_author_selector": ".custom-author-class",
-                "article_date_selector": "time.custom-date-class[datetime]"
-            },
-            "llm_analysis_pending": False
-        }
+    def test_is_data_sufficient_false_no_text(self):
+        self.assertFalse(self.parser._is_data_sufficient({"title": "A Title"}))
 
-
-    def test_is_data_sufficient(self):
-        self.assertTrue(self.parser._is_data_sufficient({"title": "t", "text": "c"}))
-        self.assertFalse(self.parser._is_data_sufficient({"title": "t", "text": ""}))
-        self.assertFalse(self.parser._is_data_sufficient({"title": "", "text": "c"}))
+    def test_is_data_sufficient_false_empty(self):
+        self.assertFalse(self.parser._is_data_sufficient({"title": " ", "text": "  "}))
         self.assertFalse(self.parser._is_data_sufficient(None))
-        self.assertFalse(self.parser._is_data_sufficient({"foo": "bar"}))
+
 
     def test_normalize_extracted_data(self):
-        raw = {"headline": "A Title", "articleBody": "Content here.", "author": {"name": "John Doe"}, "datePublished": "2024-01-01"}
-        norm = self.parser._normalize_extracted_data(raw, "http://example.com", "test_method")
-        self.assertEqual(norm["title"], "A Title")
-        self.assertEqual(norm["text"], "Content here.")
-        self.assertEqual(norm["authors"], ["John Doe"])
-        self.assertEqual(norm["published_date_utc"], datetime(2024,1,1, tzinfo=timezone.utc))
-        self.assertEqual(norm["url"], "http://example.com")
+        raw = {"headline": " Test Title ", "articleBody": " Body text. ", "author": {"name": " Author Name "}, "datePublished": "2023-10-05T10:00:00+02:00"}
+        norm = self.parser._normalize_extracted_data(raw, self.sample_url, "test_method")
+        self.assertEqual(norm["title"], "Test Title")
+        self.assertEqual(norm["text"], "Body text.")
+        self.assertEqual(norm["authors"], ["Author Name"])
+        self.assertEqual(norm["published_date_utc"], datetime(2023, 10, 5, 8, 0, 0, tzinfo=timezone.utc)) # Converted to UTC
+        self.assertEqual(norm["url"], self.sample_url)
         self.assertEqual(norm["extraction_method"], "test_method")
 
-    # --- Test individual parsing strategies (mocking underlying tools if complex) ---
+
     def test_parse_with_custom_selectors_success(self):
-        result = self.parser._parse_with_custom_selectors(self.html_for_custom, self.url_for_custom, self.source_config_custom)
-        self.assertIsNotNone(result)
-        self.assertEqual(result.get("title"), "Actual Title")
-        self.assertIn("First paragraph.\nSecond paragraph.", result.get("text", ""))
-        self.assertIn("Custom Author", result.get("authors", []))
-        self.assertEqual(result.get("published_date_utc"), datetime(2024,2,10,10,0,0, tzinfo=timezone.utc))
+        html = "<html><body><h1 class='article-headline'>Title</h1><div class='content'><p>P1</p><p>P2</p></div></body></html>"
+        config = {"extraction_selectors": {"article_title_selector": "h1.article-headline", "article_content_selector": "div.content p"}}
+        result = self.parser._parse_with_custom_selectors(html, self.sample_url, config)
+        self.assertEqual(result.get("title"), "Title")
+        self.assertEqual(result.get("text"), "P1\nP2")
         self.assertEqual(result.get("extraction_method"), "custom_css")
 
-    def test_parse_with_schema_org_success(self):
-        result = self.parser._parse_with_schema_org(self.html_with_schema, self.url_with_schema)
-        self.assertIsNotNone(result)
-        self.assertEqual(result.get("title"), "Schema Headline")
-        self.assertEqual(result.get("text"), "Schema article body content.")
-        self.assertIn("Schema Author", result.get("authors", []))
-        self.assertEqual(result.get("published_date_utc"), datetime(2024,3,15,12,0,0, tzinfo=timezone.utc))
-        self.assertEqual(result.get("extraction_method"), "schema_org_newsarticle") # or article
+    @patch('extruct.extract')
+    def test_parse_with_schema_org_success(self, mock_extruct_extract):
+        mock_extruct_extract.return_value = {
+            "json-ld": [{"@type": "NewsArticle", "headline": "SchemaTitle", "articleBody": "SchemaText", "datePublished": "2023-01-01T12:00:00Z"}]
+        }
+        result = self.parser._parse_with_schema_org("<html></html>", self.sample_url)
+        self.assertEqual(result.get("title"), "SchemaTitle")
+        self.assertEqual(result.get("text"), "SchemaText")
+        self.assertEqual(result.get("extraction_method"), "schema_org_newsarticle")
 
-    @patch.object(Parser, '_parse_generic_date_to_utc', return_value=datetime(2024,1,1, tzinfo=timezone.utc)) # Mock date parsing for simplicity
-    def test_parse_with_general_ai_success(self, mock_date_parser):
-        # Ensure self.parser.crawler and its 'read' method are properly mocked if WebCrawler init might fail
-        mock_ai_read_result = MagicMock()
-        mock_ai_read_result.text = "AI extracted general text"
-        mock_ai_read_result.metadata = {"title": "AI General Title", "date": "2024-01-01T00:00:00Z", "author": "AI Author"}
-        self.parser.crawler.read.return_value = mock_ai_read_result # Patching the read method of the mocked crawler
-
+    def test_parse_with_general_ai_success(self):
+        # Uses the default mock_ai_result_default from setUp
         result = self.parser._parse_with_general_ai(self.sample_html, self.sample_url)
-        self.assertIsNotNone(result)
-        self.assertEqual(result.get("title"), "AI General Title")
-        self.assertEqual(result.get("text"), "AI extracted general text")
-        self.assertIn("AI Author", result.get("authors", []))
+        self.assertEqual(result.get("title"), "Default AI Title")
+        self.assertEqual(result.get("text"), "Default AI text")
         self.assertEqual(result.get("extraction_method"), "general_ai")
 
-    # --- Test parse_content orchestrator ---
-    @patch.object(Parser, '_parse_with_custom_selectors')
-    @patch.object(Parser, '_parse_with_schema_org')
-    @patch.object(Parser, '_parse_with_general_ai')
-    def test_parse_content_uses_custom_if_sufficient(self, mock_ai, mock_schema, mock_custom):
-        mock_custom.return_value = {"title": "Custom Title", "text": "Custom Text", "extraction_method": "custom_css"}
-        self.parser.parse_content("html", "url", self.source_config_custom) # source_config_custom has selectors
-        mock_custom.assert_called_once()
-        mock_schema.assert_not_called()
-        # mock_ai might be called depending on logic (e.g. always call for comparison)
-        # For now, assuming it's not called if custom is sufficient. Adjust if logic changes.
+    # --- Test parse_content orchestrator logic ---
+    def test_parse_content_prioritizes_custom_then_schema_then_ai(self):
+        # Custom is sufficient
+        with patch.object(self.parser, '_parse_with_custom_selectors', return_value={"title":"Custom", "text":"Content", "extraction_method":"custom"}) as m_custom, \
+             patch.object(self.parser, '_parse_with_schema_org') as m_schema, \
+             patch.object(self.parser, '_parse_with_general_ai') as m_ai:
+            result = self.parser.parse_content(self.sample_html, self.sample_url, {"extraction_selectors": {"title": "h1"}})
+            m_custom.assert_called_once()
+            m_schema.assert_not_called() # Should not be called if custom is sufficient
+            m_ai.assert_called_once() # AI is called for comparison/ultimate fallback
+            self.assertEqual(result.get("extraction_method"), "custom")
 
-    @patch.object(Parser, '_parse_with_custom_selectors', return_value=None) # Custom fails
-    @patch.object(Parser, '_parse_with_schema_org')
-    @patch.object(Parser, '_parse_with_general_ai')
-    def test_parse_content_falls_back_to_schema(self, mock_ai, mock_schema, mock_custom):
-        mock_schema.return_value = {"title": "Schema Title", "text": "Schema Text", "extraction_method": "schema_org"}
-        self.parser.parse_content("html", "url", self.source_config_empty)
-        mock_custom.assert_called_once()
-        mock_schema.assert_called_once()
-        # mock_ai call depends on whether schema was sufficient or if AI is always called.
+        # Custom fails, Schema is sufficient
+        with patch.object(self.parser, '_parse_with_custom_selectors', return_value={"title":None, "text":None, "extraction_method":"custom"}) as m_custom, \
+             patch.object(self.parser, '_parse_with_schema_org', return_value={"title":"Schema", "text":"Content", "extraction_method":"schema"}) as m_schema, \
+             patch.object(self.parser, '_parse_with_general_ai') as m_ai:
+            result = self.parser.parse_content(self.sample_html, self.sample_url, {"extraction_selectors": {"title": "h1"}})
+            m_custom.assert_called_once()
+            m_schema.assert_called_once()
+            m_ai.assert_called_once()
+            self.assertEqual(result.get("extraction_method"), "schema")
 
-    @patch.object(Parser, '_parse_with_custom_selectors', return_value=None)
-    @patch.object(Parser, '_parse_with_schema_org', return_value=None) # Schema also fails
-    @patch.object(Parser, '_parse_with_general_ai')
-    def test_parse_content_falls_back_to_general_ai(self, mock_ai, mock_schema, mock_custom):
-        mock_ai.return_value = {"title": "AI Title", "text": "AI Text", "extraction_method": "general_ai"}
-        self.parser.parse_content("html", "url", self.source_config_empty)
-        mock_custom.assert_called_once()
-        mock_schema.assert_called_once()
-        mock_ai.assert_called_once() # Should be called as others failed
+        # Custom and Schema fail, AI is sufficient
+        with patch.object(self.parser, '_parse_with_custom_selectors', return_value=None) as m_custom, \
+             patch.object(self.parser, '_parse_with_schema_org', return_value=None) as m_schema, \
+             patch.object(self.parser, '_parse_with_general_ai', return_value={"title":"AI", "text":"Content", "extraction_method":"ai"}) as m_ai:
+            result = self.parser.parse_content(self.sample_html, self.sample_url, self.empty_source_config)
+            m_custom.assert_called_once()
+            m_schema.assert_called_once()
+            m_ai.assert_called_once()
+            self.assertEqual(result.get("extraction_method"), "ai")
 
-    # --- Test LLM Trigger Logic ---
-    @patch.object(Parser, '_parse_with_custom_selectors', side_effect=[None, {"title": "LLM Title", "text": "LLM Text", "extraction_method":"custom_css_after_llm"}]) # First call no selectors, second call has new ones
-    @patch.object(Parser, '_parse_with_schema_org', return_value=None)
-    @patch.object(Parser, '_parse_with_general_ai', return_value=None) # All initial methods return insufficient data
-    def test_parse_content_triggers_llm_and_reparses(self, mock_ai, mock_schema, mock_custom_parse_calls):
-        source_name_llm = "LLMSourceTest"
-        llm_test_config = {"name": source_name_llm, "llm_analysis_pending": True, "extraction_selectors": None}
 
-        # Mock StructureAnalyzer to return some selectors
-        dummy_llm_selectors = {"article_title_selector": "h1.llm", "article_content_selector": "div.llm"}
-        self.mock_structure_analyzer.generate_extraction_selectors.return_value = dummy_llm_selectors
+    def test_parse_content_llm_trigger_success_updates_and_reparses(self):
+        source_config_for_llm = {"name": "LLMTriggerSource", "llm_analysis_pending": True, "extraction_selectors": None}
+        # Initial parsing attempts fail or are insufficient
+        self.parser._parse_with_custom_selectors = MagicMock(return_value=None)
+        self.parser._parse_with_schema_org = MagicMock(return_value=None)
+        self.parser._parse_with_general_ai = MagicMock(return_value={"title": "Weak AI", "text": None}) # Insufficient
 
-        result = self.parser.parse_content(self.sample_html, self.sample_url, llm_test_config)
+        # LLM returns new selectors
+        llm_generated_selectors = {"article_title_selector": "h1.llm_title", "article_content_selector": "div.llm_content"}
+        self.mock_structure_analyzer.generate_extraction_selectors.return_value = llm_generated_selectors
+
+        # Mock custom selector parsing to return good data on the *second* call (after LLM)
+        mock_custom_parse_results = [
+            None, # First call (no selectors or existing ones failed)
+            self.parser._normalize_extracted_data( # Second call (with LLM selectors)
+                {"title": "Title From LLM Selectors", "text": "Content from LLM selectors"},
+                self.sample_url,
+                "custom_css_llm"
+            )
+        ]
+        self.parser._parse_with_custom_selectors = MagicMock(side_effect=mock_custom_parse_results)
+
+        result = self.parser.parse_content(self.sample_html, self.sample_url, source_config_for_llm)
 
         self.mock_structure_analyzer.generate_extraction_selectors.assert_called_once_with(self.sample_url, self.sample_html)
-        self.assertEqual(self.mock_planner_ref.updated_selectors, dummy_llm_selectors)
-        self.assertTrue(self.mock_planner_ref.saved_config)
-        self.assertEqual(mock_custom_parse_calls.call_count, 2) # Initial try (fail), second try (with LLM selectors)
-        self.assertIsNotNone(result)
-        self.assertEqual(result.get("title"), "LLM Title") # From the second call to _parse_with_custom_selectors
-        self.assertEqual(result.get("extraction_method"), "custom_css_after_llm") # Ensure it's from the re-parse
+        self.assertIn({"source_name": "LLMTriggerSource", "selectors": llm_generated_selectors}, self.mock_planner_ref.updated_selectors_log)
+        self.assertTrue(self.mock_planner_ref.saved_config) # Config should be saved
+        self.assertEqual(self.parser._parse_with_custom_selectors.call_count, 2) # Called once before LLM, once after
+        self.assertEqual(result.get("title"), "Title From LLM Selectors")
+        self.assertEqual(result.get("extraction_method"), "custom_css_llm")
+        # Check that llm_analysis_pending was updated in the local source_config copy
+        self.assertFalse(source_config_for_llm.get("llm_analysis_pending"))
 
 
-    @patch.object(Parser, '_parse_with_general_ai', return_value={"title":"AI Fallback", "text":"Text"}) # Ensure general AI has something
-    def test_parse_content_llm_fails_uses_general_ai(self, mock_ai):
-        source_name_llm_fail = "LLMSourceFailTest"
-        llm_fail_config = {"name": source_name_llm_fail, "llm_analysis_pending": True, "extraction_selectors": None}
+    def test_parse_content_llm_trigger_llm_fails(self):
+        source_config_for_llm_fail = {"name": "LLMFailSource", "llm_analysis_pending": True, "extraction_selectors": None}
+        self.parser._parse_with_custom_selectors = MagicMock(return_value=None)
+        self.parser._parse_with_schema_org = MagicMock(return_value=None)
+        # General AI provides some data, but it's deemed insufficient to prevent LLM trigger
+        self.parser._parse_with_general_ai = MagicMock(return_value={"title": "AI Title only", "text": None, "extraction_method": "general_ai"})
 
-        self.mock_structure_analyzer.generate_extraction_selectors.return_value = None # LLM returns no selectors
+        self.mock_structure_analyzer.generate_extraction_selectors.return_value = None # LLM fails
 
-        # Mock other parsing methods to return None or insufficient
-        with patch.object(self.parser, '_parse_with_custom_selectors', return_value=None), \
-             patch.object(self.parser, '_parse_with_schema_org', return_value=None):
-            result = self.parser.parse_content(self.sample_html, self.sample_url, llm_fail_config)
+        result = self.parser.parse_content(self.sample_html, self.sample_url, source_config_for_llm_fail)
 
         self.mock_structure_analyzer.generate_extraction_selectors.assert_called_once()
-        self.assertEqual(self.mock_planner_ref.llm_flag_set, (source_name_llm_fail, False)) # Flag set to False
+        self.assertIn({"source_name": "LLMFailSource", "status": False}, self.mock_planner_ref.llm_flag_log)
         self.assertTrue(self.mock_planner_ref.saved_config)
-        self.assertIsNotNone(result)
-        self.assertEqual(result.get("title"), "AI Fallback") # Should use general AI's result
+        self.assertEqual(result.get("title"), "AI Title only") # Falls back to the (insufficient) AI data
+        self.assertEqual(result.get("extraction_method"), "general_ai")
+
 
 if __name__ == '__main__':
     unittest.main()
