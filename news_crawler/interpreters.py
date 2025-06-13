@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from typing import List, Optional
 
+from collections import Counter
+from bs4 import BeautifulSoup
+
 from pydantic import BaseModel, Field
 from crawl4ai import LLMExtractionStrategy, LLMConfig
 
@@ -42,6 +45,22 @@ class ArticleLinkInterpreter:
             return []
         data = results[0] if isinstance(results, list) else results
         return data.get("links", [])
+
+    def find_recurrent_news_class(self, html: str) -> Optional[str]:
+        """Return the most common ``div`` class inside ``<main>`` if repeated."""
+        soup = BeautifulSoup(html, "lxml")
+        main = soup.find("main")
+        if not main:
+            return None
+        class_counter: Counter[str] = Counter()
+        for div in main.find_all("div", class_=True):
+            classes = div.get("class") or []
+            for cls in classes:
+                class_counter[cls] += 1
+        if not class_counter:
+            return None
+        cls, count = class_counter.most_common(1)[0]
+        return cls if count > 1 else None
 
 
 class ArticleInterpreter:
