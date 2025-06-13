@@ -43,6 +43,17 @@ class TestArticleLinkInterpreter(unittest.TestCase):
         cls = self.interpreter.find_recurrent_news_class(html)
         self.assertIsNone(cls)
 
+    def test_get_sample_news_div(self):
+        html = (
+            "<html><body><main>"
+            "<div class='news-item'>A</div>"
+            "<div class='news-item'>B</div>"
+            "<div class='other'>C</div>"
+            "</main></body></html>"
+        )
+        sample = self.interpreter.get_sample_news_div(html)
+        self.assertIn("news-item", sample)
+
 
 if __name__ == "__main__":
     unittest.main()

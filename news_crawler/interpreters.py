@@ -62,6 +62,18 @@ class ArticleLinkInterpreter:
         cls, count = class_counter.most_common(1)[0]
         return cls if count > 1 else None
 
+    def get_sample_news_div(self, html: str) -> Optional[str]:
+        """Return HTML of a sample news ``div`` using the recurrent class."""
+        cls = self.find_recurrent_news_class(html)
+        if not cls:
+            return None
+        soup = BeautifulSoup(html, "lxml")
+        main = soup.find("main")
+        if not main:
+            return None
+        div = main.find("div", class_=cls)
+        return str(div) if div else None
+
 
 class ArticleInterpreter:
     """Extract structured article data using ``LLMExtractionStrategy``."""
