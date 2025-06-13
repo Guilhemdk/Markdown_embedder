@@ -39,7 +39,25 @@ class ArticleLinkInterpreter:
         )
         self.strategy.input_format = "html"
 
-    def find_recurrent_news_class(self, html: str) -> Optional[str]:
+    #TODO: implement the logic to retrieve the content of a link fetched through ArticleInterpreter
+
+
+
+
+class ArticleInterpreter:
+    """Extract structured article div using ``LLMExtractionStrategy``."""
+
+    #TODO: modify the __init__ accordingly to the new updated functions
+    def __init__(self, llm_config: LLMConfig) -> None:
+        self.strategy = LLMExtractionStrategy(
+            llm_config=llm_config,
+            schema=ArticleInfo.model_json_schema(),
+            extraction_type="schema",
+            instruction="Extract the title, publication date, and description from the article.",
+        )
+        self.strategy.input_format = "html"
+
+    async def find_recurrent_news_class(self, html: str) -> Optional[str]:
         """Return the most common ``div`` class inside ``<main>`` if repeated."""
         soup = BeautifulSoup(html, "lxml")
         main = soup.find("main")
@@ -55,7 +73,7 @@ class ArticleLinkInterpreter:
         cls, count = class_counter.most_common(1)[0]
         return cls if count > 1 else None
 
-    def get_sample_news_div(self, html: str) -> Optional[str]:
+    async def get_sample_news_div(self, html: str) -> Optional[str]:
         """Return HTML of a sample news ``div`` using the recurrent class."""
         cls = self.find_recurrent_news_class(html)
         if not cls:
@@ -67,21 +85,8 @@ class ArticleLinkInterpreter:
         div = main.find("div", class_=cls)
         return str(div) if div else None
 
-
-
-class ArticleInterpreter:
-    """Extract structured article div using ``LLMExtractionStrategy``."""
-
-    def __init__(self, llm_config: LLMConfig) -> None:
-        self.strategy = LLMExtractionStrategy(
-            llm_config=llm_config,
-            schema=ArticleInfo.model_json_schema(),
-            extraction_type="schema",
-            instruction="Extract the title, publication date, and description from the article.",
-        )
-        self.strategy.input_format = "html"
-
     async def generate_div(self, url: str, html: str):
+        """ Generate a schema for the most recurrent div class in the <main> """
         schema = JsonCssExtractionStrategy.generate_schema(
             html=html,
             llm_config=llm_config,
@@ -91,4 +96,3 @@ class ArticleInterpreter:
     
     # TODO: save to domain structure 
 
-    async def extract(self, url: str, html: str):

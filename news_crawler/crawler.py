@@ -23,23 +23,15 @@ class NewsCrawler:
         self.article_interpreter = article_interpreter
 
     async def crawl(self, url: str, depth: int = 0) -> List[ArticleInfo]:
-        html_result = await self.fetcher.fetch(url)
-        news_div = await self.article_interpreter.generate_div(url, html_result)
-        # links = await self.link_interpreter.extract_links(url, html_result.html)
+        html = await self.fetcher.fetch(url)
+        news_div = await self.article_interpreter.get_sample_news_div(html)
+        div_schema = await self.article_interpreter.generate_div(url, news_div)
 
+        #TODO: implement the loop for going through the home page html and retrieve the links of each identified schema
+        
+        #TODO: implement the generate div for 1 retrieved article link
 
-        articles: List[ArticleInfo] = []
-        for link in links:
-            article_html = await self.fetcher.fetch(link)
-            try:
-                articles.append(await self.article_interpreter.extract(link, article_html.html))
-            except ValueError:
-                # Not an article, maybe a section page
-                if depth == 0:
-                    articles.extend(await self.crawl(link, depth=1))
-        if depth == 0 and not articles:
-            raise RuntimeError("No articles discovered within one level of depth")
-        return articles
+        #TODO: implement the for loop for fetching the title, description, content, author, date and type of each article
 
 
 class SitePoller:
