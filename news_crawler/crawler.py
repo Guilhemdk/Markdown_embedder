@@ -24,7 +24,9 @@ class NewsCrawler:
 
     async def crawl(self, url: str, depth: int = 0) -> List[ArticleInfo]:
         html_result = await self.fetcher.fetch(url)
-        links = await self.link_interpreter.extract_links(url, html_result.html)
+        news_div = await self.article_interpreter.generate_div(url, html_result)
+        # links = await self.link_interpreter.extract_links(url, html_result.html)
+
 
         articles: List[ArticleInfo] = []
         for link in links:

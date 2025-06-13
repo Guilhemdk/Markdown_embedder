@@ -1,15 +1,15 @@
 """LLM-based interpreters for link discovery and article parsing."""
 
 from __future__ import annotations
-
+import os, json
 from typing import List, Optional
-
 from collections import Counter
 from bs4 import BeautifulSoup
-
 from pydantic import BaseModel, Field
-from crawl4ai import LLMExtractionStrategy, LLMConfig
+from crawl4ai import LLMExtractionStrategy, LLMConfig, JsonCssExtractionStrategy
 
+llm_config = LLMConfig(provider="openai/gpt-4o-mini",
+                       api_token=os.getenv("OPENAI_API_KEY"))
 
 class LinkList(BaseModel):
     """Schema for a list of article links."""
@@ -39,13 +39,6 @@ class ArticleLinkInterpreter:
         )
         self.strategy.input_format = "html"
 
-    async def extract_links(self, url: str, html: str) -> List[str]:
-        results = self.strategy.extract(url=url, html_content=html)
-        if not results:
-            return []
-        data = results[0] if isinstance(results, list) else results
-        return data.get("links", [])
-
     def find_recurrent_news_class(self, html: str) -> Optional[str]:
         """Return the most common ``div`` class inside ``<main>`` if repeated."""
         soup = BeautifulSoup(html, "lxml")
@@ -62,9 +55,22 @@ class ArticleLinkInterpreter:
         cls, count = class_counter.most_common(1)[0]
         return cls if count > 1 else None
 
+    def get_sample_news_div(self, html: str) -> Optional[str]:
+        """Return HTML of a sample news ``div`` using the recurrent class."""
+        cls = self.find_recurrent_news_class(html)
+        if not cls:
+            return None
+        soup = BeautifulSoup(html, "lxml")
+        main = soup.find("main")
+        if not main:
+            return None
+        div = main.find("div", class_=cls)
+        return str(div) if div else None
+
+
 
 class ArticleInterpreter:
-    """Extract structured article data using ``LLMExtractionStrategy``."""
+    """Extract structured article div using ``LLMExtractionStrategy``."""
 
     def __init__(self, llm_config: LLMConfig) -> None:
         self.strategy = LLMExtractionStrategy(
@@ -75,10 +81,14 @@ class ArticleInterpreter:
         )
         self.strategy.input_format = "html"
 
-    async def extract(self, url: str, html: str) -> ArticleInfo:
-        result = self.strategy.extract(url=url, html_content=html)
-        if isinstance(result, list) and result:
-            return ArticleInfo(**result[0])
-        if isinstance(result, dict):
-            return ArticleInfo(**result)
-        raise ValueError("No article data extracted")
+    async def generate_div(self, url: str, html: str):
+        schema = JsonCssExtractionStrategy.generate_schema(
+            html=html,
+            llm_config=llm_config,
+            query=f"From {url} I have shared a sample of one news article div class with a title, description and date. Please generate a schema for this news div",
+        )
+        print(f"Generated schema: {json.dumps(schema, indent=2)}")
+    
+    # TODO: save to domain structure 
+
+    async def extract(self, url: str, html: str):
