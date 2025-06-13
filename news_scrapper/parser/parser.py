@@ -16,6 +16,8 @@ try:
     from crawl4ai import AsyncWebCrawler, Url, CrawlerRunConfig
     from crawl4ai.filters import URLPatternFilter, ContentTypeFilter
     from crawl4ai.scorers import KeywordRelevanceScorer, PathDepthScorer, CompositeScorer
+    from crawl4ai.extraction import JsonCssExtractionStrategy # Added
+    from crawl4ai.llm import LLMConfig # Added
 except ImportError:
     AsyncWebCrawler = None # type: ignore
     Url = None # type: ignore
@@ -25,28 +27,30 @@ except ImportError:
     KeywordRelevanceScorer = None # type: ignore
     PathDepthScorer = None # type: ignore
     CompositeScorer = None # type: ignore
-    print("WARNING: Parser: crawl4ai components (AsyncWebCrawler, Url, CrawlerRunConfig, Filters, Scorers) not found, using placeholders. Functionality will be affected.")
+    JsonCssExtractionStrategy = None # type: ignore # Added
+    LLMConfig = None # type: ignore # Added
+    print("WARNING: Parser: crawl4ai components (AsyncWebCrawler, Url, CrawlerRunConfig, Filters, Scorers, ExtractionStrategies, LLMConfig) not found, using placeholders. Functionality will be affected.")
 
-# JsonCssExtractionStrategy is not used directly (handled by commenting out its import block)
+# JsonCssExtractionStrategy is not used directly (handled by commenting out its import block) # This comment might be outdated now
 
 import feedparser # type: ignore[reportMissingImports]
 import extruct
 from bs4 import BeautifulSoup, Tag
 from dateutil import parser as dateutil_parser
 
-try:
-    from ..analyzer.structure_analyzer import StructureAnalyzer
-except ImportError:
-    StructureAnalyzer = None
+# try:
+#     from ..analyzer.structure_analyzer import StructureAnalyzer # Removed
+# except ImportError:
+#     StructureAnalyzer = None # Removed
 
 from typing import Any, Dict, List, Optional, Union, Set # RobotFileParser is already imported
 
 
 class Parser:
-    def __init__(self, monitor_instance=None, planner_reference=None, structure_analyzer_instance=None):
+    def __init__(self, monitor_instance=None, planner_reference=None): # structure_analyzer_instance removed
         self.monitor = monitor_instance
         self.planner_ref = planner_reference
-        self.structure_analyzer = structure_analyzer_instance
+        # self.structure_analyzer = structure_analyzer_instance # Removed
         self.robot_parsers: Dict[str, RobotFileParser] = {}
 
         if AsyncWebCrawler is None:
@@ -61,7 +65,7 @@ class Parser:
                 self.crawler = None
 
         if self.planner_ref is None: self._log_event("WARNING", "Parser: Planner reference not provided.")
-        if self.structure_analyzer is None: self._log_event("WARNING", "Parser: StructureAnalyzer not provided.")
+        # if self.structure_analyzer is None: self._log_event("WARNING", "Parser: StructureAnalyzer not provided.") # Removed
 
     def _log_event(self, level: str, message: str, details: Optional[Dict[str, Any]] = None):
         if self.monitor: self.monitor.log_event(level.upper(), message, details)
@@ -203,33 +207,168 @@ class Parser:
             # It's needed if:
             #   - No custom selectors exist OR custom selectors are marked as empty (e.g. from a previous failed LLM run)
             #   - AND llm_analysis_pending flag is true for the source
-            #   (StructureAnalyzer and planner_ref must be available for LLM to run)
-            llm_can_run = bool(self.structure_analyzer and self.planner_ref and StructureAnalyzer is not None)
+            #   (LLMConfig, an LLM strategy, and planner_ref must be available for LLM to run)
+            #   The actual StructureAnalyzer component is no longer part of Parser.
+            #   The Planner will be responsible for invoking LLM operations if needed,
+            #   potentially by having its own StructureAnalyzer or similar component.
+            #   For now, parse_content will assume LLM features are invoked elsewhere if needed,
+            #   or this part of logic might be simplified if LLM generation is not parser's direct duty.
+            #   Let's assume the check for LLM components will be more abstract or removed from here.
+            #   For this refactoring, we remove direct llm_can_run check based on self.structure_analyzer.
+            #   The `needs_llm_analysis` flag from source_config will be the main driver if we were to keep LLM logic here.
+            #   However, the original instruction implies StructureAnalyzer is removed from Parser,
+            #   so the LLM selector generation block within parse_content will be affected.
+            #   This subtask is only for __init__, but this highlights a dependency.
+            #   For now, we'll just remove the direct use of self.structure_analyzer.
+            #   The LLM block in parse_content will be addressed in a later subtask if it needs adjustment.
+            #   The current subtask is only to remove StructureAnalyzer from __init__ and its direct references.
+
+            llm_components_available = bool(self.planner_ref and self.crawler and LLMConfig is not None and JsonCssExtractionStrategy is not None and Url is not None and CrawlerRunConfig is not None)
 
             needs_llm_analysis = (not custom_selectors or custom_selectors.get("_isEmpty", False)) and \
                                  source_config.get("llm_analysis_pending", True)
 
-            if custom_selectors and not custom_selectors.get("_isEmpty", False):
-                self._log_event("INFO", f"Attempting extraction with existing custom CSS selectors for {url}")
-                result_custom = self._parse_with_custom_selectors(html_content, url, source_config)
-                if self._is_data_sufficient(result_custom):
-                    final_result = result_custom
-                    extraction_schema_used = custom_selectors # Store the actual selectors used
-                    self._log_event("INFO", f"Sufficient data extracted using existing custom CSS for {url}")
+            schema_to_use_for_extraction: Optional[Dict[str, Any]] = None
+
+            # Strategy:
+            # 1. If llm_analysis_pending is true: Try to generate a new schema.
+            # 2. If llm_analysis_pending is false OR schema generation fails: Use existing selectors if they are in the new format.
+            # 3. If new format schema extraction fails OR not applicable: Fallback to old _parse_with_custom_selectors if selectors seem old format.
+
+            if needs_llm_analysis:
+                if llm_components_available:
+                    self._log_event("INFO", f"Attempting LLM schema generation for {source_name} ({url}).")
+                    html_input_for_schema = source_config.get("html_snippet_for_schema_gen", html_content) # Use snippet if available
+
+                    # Define LLMConfig (ensure LLMConfig class is available)
+                    current_llm_config = LLMConfig(provider="OpenAI/gpt-3.5-turbo", api_token="env:OPENAI_API_KEY") # Smaller model for schema gen
+
+                    # Define Query
+                    # TODO: Query might need to be more sophisticated, e.g. providing examples of desired output structure.
+                    schema_gen_query = (
+                        f"Generate an extraction schema for a news article from {url}. "
+                        "The schema should identify and provide CSS selectors for the following fields: "
+                        "title, text (main content), authors, published_date_utc (or any date field), and image_url (main article image if any). "
+                        "Provide the output as a JSON object where keys are field names and values are CSS selectors. "
+                        "If a field is not found, its selector can be null or an empty string."
+                    )
+
+                    new_generated_schema: Optional[Dict[str, Any]] = None
+                    try:
+                        # generate_schema is a static method
+                        self._log_event("DEBUG", f"Calling JsonCssExtractionStrategy.generate_schema for {url}")
+                        new_generated_schema = JsonCssExtractionStrategy.generate_schema(
+                            html=html_input_for_schema,
+                            llm_config=current_llm_config,
+                            query=schema_gen_query
+                        )
+                    except Exception as e:
+                        self._log_event("ERROR", f"Error during JsonCssExtractionStrategy.generate_schema for {url}: {e}", {"exc_type": type(e).__name__})
+                        new_generated_schema = {"_isEmpty": True, "error": str(e)} # Mark as empty on error
+
+                    if new_generated_schema and not new_generated_schema.get("_isEmpty"):
+                        self._log_event("INFO", f"LLM successfully generated new schema for {url}.", {"schema": new_generated_schema})
+                        if self.planner_ref:
+                            self.planner_ref.update_source_extraction_selectors(source_name, new_generated_schema)
+                            self.planner_ref.set_llm_analysis_flag(source_name, False, generated_new_selectors=True)
+                            if hasattr(self.planner_ref, 'save_config'): self.planner_ref.save_config()
+                        schema_to_use_for_extraction = new_generated_schema
+                    else:
+                        self._log_event("WARNING", f"LLM schema generation failed or returned empty schema for {url}.", {"returned_schema": new_generated_schema})
+                        if self.planner_ref:
+                            # Store the empty/error schema to prevent retries if it's marked _isEmpty
+                            if new_generated_schema and new_generated_schema.get("_isEmpty"):
+                                self.planner_ref.update_source_extraction_selectors(source_name, new_generated_schema)
+                            self.planner_ref.set_llm_analysis_flag(source_name, False, generated_new_selectors=False)
+                            if hasattr(self.planner_ref, 'save_config'): self.planner_ref.save_config()
+                        # Do not set schema_to_use_for_extraction, rely on existing or fallback
+                else: # llm_components_available is false
+                     self._log_event("WARNING", f"LLM components (LLMConfig, JsonCssExtractionStrategy, Crawler, Planner) not available for {url}. Cannot generate new schema.", {"url": url})
+
+            # If no new schema was generated (either because llm_analysis_pending was false, or generation failed),
+            # try to use existing selectors if they are in the new JsonCssExtractionStrategy format.
+            if not schema_to_use_for_extraction and custom_selectors and not custom_selectors.get("_isEmpty"):
+                # Heuristic: if selectors have keys like 'article_title_selector', it's old format.
+                # New format schemas are typically more complex dicts, might not have these specific top-level keys directly
+                # or might have a specific marker like "_schema_type": "JsonCssExtractionStrategy".
+                # For now, assume any non-_isEmpty custom_selectors could be a new schema.
+                # A more robust check for schema format might be needed.
+                is_likely_new_schema_format = not any(key.endswith("_selector") for key in custom_selectors.keys()) or custom_selectors.get("_is_json_css_schema")
+
+                if is_likely_new_schema_format:
+                    self._log_event("INFO", f"Using existing JsonCssExtractionStrategy schema from source_config for {url}")
+                    schema_to_use_for_extraction = custom_selectors
                 else:
-                    self._log_event("DEBUG", f"Existing custom CSS selectors did not yield sufficient data for {url}")
+                    # This is where we'd use the old _parse_with_custom_selectors if selectors are in old format
+                    self._log_event("INFO", f"Existing selectors for {url} appear to be in old format. Attempting with _parse_with_custom_selectors.")
+                    result_custom_old_format = self._parse_with_custom_selectors(html_content, url, source_config)
+                    if self._is_data_sufficient(result_custom_old_format):
+                        final_result = result_custom_old_format
+                        extraction_schema_used = custom_selectors # old format dict
+                        self._log_event("INFO", f"Sufficient data extracted using existing old-format custom CSS for {url}")
 
-            # If current selectors (if any) failed, and LLM is an option and hasn't failed permanently before for this source
-            if not self._is_data_sufficient(final_result) and needs_llm_analysis:
-                if llm_can_run:
-                    self._log_event("INFO", f"Attempting LLM selector generation for {source_name} ({url}).")
-                    # Placeholder for potentially checking/using domain-specific selectors from planner_ref first
-                    # e.g., domain_specific_selectors = self.planner_ref.get_domain_specific_selectors(url)
-                    # if domain_specific_selectors: new_selectors = domain_specific_selectors ...
-                    new_selectors = self.structure_analyzer.generate_extraction_selectors(url, html_content)
 
-                    if new_selectors and not new_selectors.get("_isEmpty", False) : # Check if new_selectors are valid
-                        self._log_event("INFO", f"LLM generated new selectors for {url}. Re-parsing.", {"url": url})
+            # Attempt extraction if a JsonCssExtractionStrategy schema is available (either newly generated or from config)
+            if schema_to_use_for_extraction and JsonCssExtractionStrategy and self.crawler and Url and CrawlerRunConfig:
+                if not self._is_data_sufficient(final_result): # Only if not already found sufficient data via old selectors
+                    self._log_event("INFO", f"Attempting extraction with JsonCssExtractionStrategy for {url}", {"schema_keys": list(schema_to_use_for_extraction.keys())})
+                    try:
+                        extraction_instance = JsonCssExtractionStrategy(schema=schema_to_use_for_extraction)
+                        # Use a temporary CrawlerRunConfig with this specific extraction strategy
+                        temp_crawler_config = CrawlerRunConfig(
+                            max_depth=0, max_pages=1, store_content=False, # content already fetched
+                            extraction_strategy=extraction_instance
+                        )
+                        # Provide html_content directly to arun if possible, or ensure it fetches the same URL again
+                        # Current arun takes seed_url, so it will re-fetch. Better if it could take html_content.
+                        # For now, assuming it will re-fetch using the URL.
+                        crawl_results = await self.crawler.arun(
+                            seed_url=Url(url=url, html_content=html_content), # Pass html_content to avoid re-fetch
+                            crawler_run_config=temp_crawler_config
+                        )
+
+                        if crawl_results and crawl_results.results and crawl_results.results[0].extracted_content:
+                            extracted_data_str = crawl_results.results[0].extracted_content
+                            extracted_data_dict = {}
+                            try:
+                                extracted_data_dict = json.loads(extracted_data_str)
+                                if not isinstance(extracted_data_dict, dict): # Ensure it's a dict
+                                     self._log_event("ERROR", f"JsonCssExtractionStrategy output is not a dict: {type(extracted_data_dict)}", {"url": url})
+                                     extracted_data_dict = {"error_message": "Extracted content was not a JSON dictionary."}
+                            except json.JSONDecodeError as json_err:
+                                self._log_event("ERROR", f"Failed to decode JSON from JsonCssExtractionStrategy for {url}: {json_err}", {"raw_output": extracted_data_str[:500]})
+                                extracted_data_dict = {"error_message": f"JSONDecodeError: {json_err}"}
+
+                            # Normalize this data. The 'extraction_method' indicates it came from this new strategy.
+                            result_from_llm_schema = self._normalize_extracted_data(extracted_data_dict, url, "llm_json_css_schema")
+
+                            if self._is_data_sufficient(result_from_llm_schema):
+                                final_result = result_from_llm_schema
+                                extraction_schema_used = schema_to_use_for_extraction # Store the schema dict itself
+                                self._log_event("INFO", f"Sufficient data extracted using JsonCssExtractionStrategy for {url}")
+                            else:
+                                self._log_event("WARNING", f"JsonCssExtractionStrategy did not yield sufficient data for {url}", {"extracted_fields": list(extracted_data_dict.keys())})
+                        else:
+                            self._log_event("WARNING", f"JsonCssExtractionStrategy extraction failed or produced no content for {url}",
+                                            {"results_count": len(crawl_results.results) if crawl_results and crawl_results.results else 0})
+                    except Exception as e:
+                        self._log_event("ERROR", f"Error during extraction with JsonCssExtractionStrategy for {url}: {e}", {"exc_type": type(e).__name__})
+
+            # Fallback for when `needs_llm_analysis` was true but components were not available
+            elif needs_llm_analysis and not llm_components_available:
+                 self._log_event("WARNING", f"LLM analysis was needed for {url} but components are not available. Skipping LLM schema generation and extraction.", {"url": url})
+
+            # If, after all LLM/JsonCss attempts, no sufficient data, and old custom selectors haven't been tried yet
+            # (e.g. if schema_to_use_for_extraction was None, and is_likely_new_schema_format was false earlier but didn't yield results)
+            if not self._is_data_sufficient(final_result) and custom_selectors and not custom_selectors.get("_isEmpty"):
+                is_likely_old_format = any(key.endswith("_selector") for key in custom_selectors.keys())
+                if is_likely_old_format:
+                    self._log_event("INFO", f"Re-attempting with _parse_with_custom_selectors as fallback for {url}")
+                    result_custom_old_format_fallback = self._parse_with_custom_selectors(html_content, url, source_config)
+                    if self._is_data_sufficient(result_custom_old_format_fallback):
+                        final_result = result_custom_old_format_fallback
+                        extraction_schema_used = custom_selectors # old format dict
+                        self._log_event("INFO", f"Sufficient data extracted using fallback old-format custom CSS for {url}")
                         if self.planner_ref:
                              self.planner_ref.update_source_extraction_selectors(source_name, new_selectors)
                              # Also mark llm_analysis_pending as False because we have new selectors
